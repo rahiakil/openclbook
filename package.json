@@ -1,0 +1,28 @@
+{
+  "name": "openclaw",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "openclaw": "node node_modules/openclaw/openclaw.mjs",
+    "onboard": "node node_modules/openclaw/openclaw.mjs onboard",
+    "onboard:gemma4": "node node_modules/openclaw/openclaw.mjs onboard --non-interactive --mode local --auth-choice ollama --custom-model-id gemma4:latest --accept-risk --gateway-port 18789 --gateway-bind loopback",
+    "onboard:gemma4:daemon": "node node_modules/openclaw/openclaw.mjs onboard --non-interactive --mode local --auth-choice ollama --custom-model-id gemma4:latest --accept-risk --gateway-port 18789 --gateway-bind loopback --install-daemon",
+    "gateway:run": "node node_modules/openclaw/openclaw.mjs gateway run",
+    "models:set-gemma4": "node node_modules/openclaw/openclaw.mjs models set ollama/gemma4:latest",
+    "test:ollama": "bash scripts/test-ollama-chat.sh",
+    "models:list": "node node_modules/openclaw/openclaw.mjs models list --provider ollama --plain",
+    "models:set-local": "bash scripts/openclaw-set-ollama-model.sh",
+    "tui": "bash scripts/openclaw-tui.sh",
+    "gateway:foreground": "bash scripts/openclaw-gateway-run.sh",
+    "doctor": "bash scripts/openclaw-doctor.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "openclaw": "^2026.4.5"
+  }
+}
