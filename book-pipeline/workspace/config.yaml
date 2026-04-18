@@ -1,0 +1,12 @@
+# llm_provider: ollama   # or anthropic — UI dropdown overrides per run; set ANTHROPIC_API_KEY in .env
+# anthropic_model: claude-sonnet-4-20250514
+# anthropic_thinking: adaptive   # adaptive | enabled | off
+ollama_base_url: http://127.0.0.1:11434
+ollama_model: gemma4:26b
+# openclaw_gateway_url: http://127.0.0.1:18789
+# openclaw_gateway_token: set via env OPENCLAW_GATEWAY_TOKEN instead
+memory_dir_name: .memory
+manuscript_dir: manuscript
+sections_dir: sections
+outputs_dir: outputs
+todo_file: todo.file

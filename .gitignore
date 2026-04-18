@@ -1,1 +1,11 @@
 node_modules/
+book-pipeline/.venv/
+book-pipeline/workspace/outputs/
+
+# Secrets and local runtime (never commit)
+.env
+.env.*
+!.env.example
+book-pipeline/.studio/
+**/__pycache__/
+*.py[cod]

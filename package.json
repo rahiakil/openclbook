@@ -16,7 +16,10 @@
     "models:set-local": "bash scripts/openclaw-set-ollama-model.sh",
     "tui": "bash scripts/openclaw-tui.sh",
     "gateway:foreground": "bash scripts/openclaw-gateway-run.sh",
-    "doctor": "bash scripts/openclaw-doctor.sh"
+    "doctor": "bash scripts/openclaw-doctor.sh",
+    "book:verify": "cd book-pipeline && python3 -m book_pipeline verify-ollama --workspace ./workspace",
+    "book:once": "cd book-pipeline && python3 -m book_pipeline run-once --workspace ./workspace",
+    "book:ui": "cd book-pipeline && python3 -m book_pipeline ui --workspace ./workspace --host 127.0.0.1 --port 9876"
   },
   "keywords": [],
   "author": "",

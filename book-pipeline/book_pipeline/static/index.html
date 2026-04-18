@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Book supervisor — projects, memory, guided runs</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3d8bfd;
+      --ok: #3ecf8e;
+      --err: #f87171;
+      --border: #2d3a4f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 1.25rem;
+      line-height: 1.5;
+      max-width: 1400px;
+      margin-inline: auto;
+    }
+    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }
+    h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.75rem; color: var(--text); }
+    p.sub { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.9rem; }
+    .grid { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 0.25rem; }
+    input, textarea, select, button {
+      width: 100%;
+      padding: 0.5rem 0.6rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      border: none;
+      font-weight: 600;
+      margin-top: 0.5rem;
+    }
+    button.secondary { background: #334155; }
+    button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; }
+    .row > * { flex: 1; min-width: 140px; }
+    pre, .log, .md-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem;
+      font-size: 0.8rem;
+      overflow: auto;
+      max-height: 320px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .md-panel { max-height: 420px; }
+    .tag { font-size: 0.7rem; padding: 0.15rem 0.45rem; border-radius: 4px; background: #334155; color: var(--muted); }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    section { margin-bottom: 1.75rem; }
+    hr.sep { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+    .lab {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+      gap: 1rem;
+      align-items: start;
+    }
+    @media (max-width: 960px) { .lab { grid-template-columns: 1fr; } }
+
+    .chunk-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 420px; overflow: auto; padding-right: 0.25rem; }
+    .chunk-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.55rem 0.65rem;
+      background: #141c28;
+      cursor: pointer;
+      text-align: left;
+    }
+    .chunk-card:hover { border-color: #3d556f; }
+    .chunk-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(61, 139, 253, 0.25); }
+    .chunk-meta { font-size: 0.7rem; color: var(--muted); margin-bottom: 0.25rem; }
+    .chunk-prev { font-size: 0.8rem; color: var(--text); max-height: 4.5em; overflow: hidden; }
+    .side-stack { display: flex; flex-direction: column; gap: 0.75rem; }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+    .pill-row input[type="file"] { display: none; }
+    .comment-item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.5rem 0.6rem;
+      font-size: 0.8rem;
+      background: #141c28;
+    }
+    .comment-item small { color: var(--muted); }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .toolbar button { margin-top: 0; width: auto; flex: 0 0 auto; }
+    .grow { flex: 1; min-width: 160px; }
+    .mono { font-family: ui-monospace, monospace; font-size: 0.78rem; }
+    .split-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    @media (max-width: 900px) { .split-2 { grid-template-columns: 1fr; } }
+    .trace-grid { display: grid; gap: 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    @media (max-width: 1100px) { .trace-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Book supervisor</h1>
+  <section style="margin-bottom:1rem;">
+    <div class="toolbar pill-row">
+      <label style="margin:0;width:auto;flex:0 0 auto;">LLM for pipeline &amp; analyze</label>
+      <select id="llmProvider" style="width:auto;min-width:200px;max-width:280px;margin-top:0;">
+        <option value="ollama">Ollama (local)</option>
+        <option value="anthropic">Anthropic API (Claude)</option>
+      </select>
+      <button type="button" class="ghost" id="btnLlmHintRefresh" style="margin-top:0;">Refresh provider info</button>
+    </div>
+    <p class="sub mono" id="llmHint" style="margin:0.35rem 0 0;">—</p>
+  </section>
+  <p class="sub">
+    LangGraph (checkpointed) · pick <strong>Ollama</strong> or <strong>Anthropic</strong> above for each run (override).
+    Put <code>ANTHROPIC_API_KEY</code> in a <code>.env</code> file (repo root or workspace tree); optional <code>ANTHROPIC_MODEL</code>, <code>ANTHROPIC_THINKING</code> (<code>adaptive</code> | <code>enabled</code> | <code>off</code>).
+    OpenClaw: optional <code>/tools/invoke</code> after plan.
+    Studio: <code>book-pipeline/.studio/</code>. Cost hints: <code>BOOK_COST_PER_1M_*</code> (USD).
+  </p>
+
+  <section>
+    <h2>Studio — projects &amp; operator</h2>
+    <p class="sub">Each <strong>new project</strong> gets its own workspace directory, <code>.memory</code> tree (characters, research, agentic learnings), and SQLite row for migration with the container.</p>
+    <div class="split-2">
+      <div>
+        <label>Operator (local DB user)</label>
+        <div class="toolbar pill-row">
+          <span class="tag" id="studioUserTag">user: —</span>
+          <input id="studioDisplayName" class="grow" type="text" placeholder="display name" />
+          <button type="button" class="secondary" id="studioSaveMe">Save name</button>
+        </div>
+        <label style="margin-top:0.75rem;">New project name</label>
+        <div class="toolbar pill-row">
+          <input id="newProjectName" class="grow" type="text" placeholder="e.g. Netflix adaptation — my novel" />
+          <button type="button" id="btnCreateProject">Create project</button>
+        </div>
+        <label style="margin-top:0.75rem;">Open project</label>
+        <div class="toolbar pill-row">
+          <select id="projectSelect" class="grow"><option value="">— Select project —</option></select>
+          <button type="button" class="ghost" id="btnRefreshProjects">Refresh</button>
+        </div>
+        <p class="sub mono" id="studioPaths" style="margin-top:0.5rem;">—</p>
+      </div>
+      <div>
+        <label id="usagePanelLabel">Token usage (this workspace)</label>
+        <p class="sub mono" id="usagePanelHint" style="margin:0.15rem 0 0.35rem;">—</p>
+        <pre id="usageOut" class="log" style="max-height:140px;">—</pre>
+        <button type="button" class="ghost" id="btnRefreshUsage" style="margin-top:0.35rem;">Refresh usage</button>
+        <label style="margin-top:0.65rem;">Rough estimate (next full pass)</label>
+        <pre id="usageEstOut" class="log" style="max-height:100px;">—</pre>
+      </div>
+    </div>
+    <div class="split-2" style="margin-top:0.75rem;">
+      <div>
+        <label>Memory tree (<code>.memory/**/*.md</code>)</label>
+        <select id="memoryFileSelect" size="6" style="width:100%; min-height:7rem; font-size:0.8rem;"></select>
+        <div class="toolbar pill-row" style="margin-top:0.35rem;">
+          <button type="button" class="secondary" id="btnMemoryReload">Reload tree</button>
+          <button type="button" id="btnMemoryLoad">Load file</button>
+          <button type="button" class="secondary" id="btnMemorySave">Save file</button>
+        </div>
+      </div>
+      <div>
+        <label>Edit memory file</label>
+        <textarea id="memoryEditor" placeholder="Pick a path, Load file, edit, Save." style="min-height:11rem;"></textarea>
+        <p class="sub mono" id="memoryPathTag">path: —</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Manuscript lab</h2>
+    <p class="sub" style="margin-bottom:0.75rem;">
+      Load <strong>.docx</strong>, <strong>.md</strong>, <strong>.txt</strong>, <strong>.html</strong>, <strong>.odt</strong>, or <strong>.rtf</strong>.
+      The server chunks the text, calls Ollama for characters / flow / tone, and shows a structure panel. Add free-form notes per chunk
+      (e.g. “rewrite as Netflix script here”, “add a sci-fi twist”, “new character beat”) and merge them into the supervisor goal below.
+    </p>
+    <div class="lab">
+      <div>
+        <label>Workspace (same as pipeline — used for Ollama settings)</label>
+        <div class="toolbar" style="margin-bottom:0.5rem;">
+          <input id="msWorkspace" class="grow" type="text" placeholder="path to book workspace (optional if cwd has config)" />
+        </div>
+        <div class="toolbar pill-row">
+          <input id="msFile" type="file" accept=".docx,.md,.txt,.markdown,.html,.htm,.odt,.rtf" />
+          <button type="button" class="secondary" id="msPick">Load manuscript…</button>
+          <button type="button" id="msAnalyze" disabled>Analyze manuscript</button>
+          <button type="button" class="ghost" id="msGoal" disabled>Append notes to goal</button>
+          <span class="tag" id="msTag">session: —</span>
+          <span class="tag" id="msRun">analyze: idle</span>
+        </div>
+        <label style="margin-top:0.75rem;">Chunks — click one to attach a note</label>
+        <div class="chunk-list" id="msChunks">Upload a file to see chunks.</div>
+        <label style="margin-top:0.75rem;">Global note (entire manuscript)</label>
+        <textarea id="msGlobalNote" placeholder="e.g. Make the entire script funny while keeping character arcs and plot beats intact." disabled></textarea>
+        <button type="button" class="secondary" id="msSaveGlobal" disabled>Save global note</button>
+        <label style="margin-top:0.75rem;">Note for selected chunk</label>
+        <textarea id="msNote" placeholder="e.g. Shift this block to cold, clinical sci-fi tone; foreshadow the station AI earlier." disabled></textarea>
+        <button type="button" id="msAddNote" disabled>Add note</button>
+        <label style="margin-top:0.75rem;">Your notes</label>
+        <div id="msComments" class="chunk-list" style="max-height:200px;">—</div>
+        <p class="sub" style="margin-top:0.65rem;">
+          <strong>End-to-end:</strong> (1) Load file → (2) Notes / Analyze → (3) <strong>Commit to workspace</strong> writes
+          <code>manuscript/draft.md</code> or <code>sections/upload-*.md</code> plus <code>manuscript/PIPELINE_CONTEXT.md</code> →
+          (4) <strong>Run full pipeline</strong> (optionally merges lab notes) → (5) <strong>Approve merge</strong>.
+        </p>
+        <div class="toolbar pill-row" style="margin-top:0.35rem;">
+          <select id="msRecent" style="max-width:220px;"><option value="">— Recent sessions —</option></select>
+          <button type="button" class="ghost" id="msRecentRefresh">Refresh</button>
+          <select id="msCommitMode" style="max-width:200px;">
+            <option value="draft">Commit as manuscript/draft.md</option>
+            <option value="sections">Commit as sections/upload-*.md</option>
+          </select>
+          <button type="button" class="secondary" id="msCommit" disabled>Commit to workspace</button>
+        </div>
+        <p class="sub" id="msCommitOut" style="margin-top:0.25rem;"></p>
+      </div>
+      <div class="side-stack">
+        <div>
+          <label>Structure (Ollama)</label>
+          <div class="md-panel" id="msStructure">Run analysis after uploading.</div>
+        </div>
+        <div>
+          <label>Chunk insights (detail pass)</label>
+          <div class="md-panel" id="msInsights" style="max-height:220px;">—</div>
+        </div>
+        <div>
+          <label>Analyze — model thinking (Anthropic)</label>
+          <div class="md-panel" id="msAnalyzeThinking" style="max-height:200px;">—</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="sep" />
+
+  <section class="grid">
+    <div>
+      <label>Workspace directory (contains sections/ or manuscript/)</label>
+      <input id="workspace" type="text" placeholder="../workspace or absolute path" />
+    </div>
+    <div>
+      <label>Preset</label>
+      <select id="preset">
+        <option value="rewrite">Line edit / rewrite</option>
+        <option value="netflix_script">Netflix-style script</option>
+        <option value="stage_play">Stage play</option>
+        <option value="docs">Long-form documentation</option>
+      </select>
+    </div>
+  </section>
+
+  <section>
+    <label>User goal (instructions)</label>
+    <textarea id="goal" placeholder="e.g. Sharpen dialogue in Act II; keep omniscient narrator."></textarea>
+  </section>
+
+  <section>
+    <label class="row" style="align-items:center;">
+      <input type="checkbox" id="useOc" style="width:auto;" />
+      After plan, call OpenClaw tool (Gateway must be up; tool must be HTTP-allowed)
+    </label>
+    <div class="grid" style="margin-top:0.5rem;">
+      <div>
+        <label>Tool name</label>
+        <input id="ocTool" type="text" placeholder="e.g. sessions_list" disabled />
+      </div>
+      <div>
+        <label>Args JSON</label>
+        <input id="ocArgs" type="text" value="{}" disabled />
+      </div>
+    </div>
+    <p class="sub" style="margin-top:0.5rem;">Set <code>OPENCLAW_GATEWAY_URL</code> + <code>OPENCLAW_GATEWAY_TOKEN</code> in env (or workspace/config.yaml). Many tools are denied over HTTP by default.</p>
+  </section>
+
+  <section>
+    <label class="row" style="align-items:center;">
+      <input type="checkbox" id="includeMsSession" style="width:auto;" checked />
+      When a manuscript session is active, merge its <strong>chunk notes + structure digest</strong> into this run’s supervisor goal
+    </label>
+  </section>
+
+  <section class="row">
+    <button type="button" id="btnRun">Run full pipeline</button>
+    <button type="button" id="btnPoll" class="secondary">Refresh state</button>
+    <button type="button" id="btnNew" class="secondary">New thread id</button>
+    <button type="button" id="btnMerge" class="secondary">Approve → canonical_merged.md</button>
+  </section>
+
+  <section>
+    <h2>Guided run (human-in-the-loop)</h2>
+    <p class="sub">Runs the same supervisor with <strong>pause after each chunk edit</strong>. Use <strong>One guided step</strong> repeatedly to approve pacing between chunks. Uses a separate checkpoint DB from the full auto run.</p>
+    <div class="toolbar pill-row">
+      <button type="button" class="secondary" id="btnGuidedNew">New guided thread</button>
+      <button type="button" id="btnGuidedStep">One guided step</button>
+      <span class="tag" id="guidedThreadTag">guided thread: —</span>
+      <span class="tag" id="guidedStatusTag">guided: idle</span>
+    </div>
+  </section>
+
+  <section>
+    <span class="tag" id="threadTag">thread: —</span>
+    <span class="tag" id="runTag">run: idle</span>
+  </section>
+
+  <section class="trace-grid">
+    <div>
+      <label>Plan (markdown output)</label>
+      <pre id="planOut">—</pre>
+    </div>
+    <div>
+      <label>Plan — extended thinking (visible for Anthropic)</label>
+      <pre id="planThinkingOut" class="log" style="max-height:280px;">—</pre>
+    </div>
+    <div>
+      <label>Run log (explicit steps)</label>
+      <pre id="logOut" class="log" style="max-height:280px;">—</pre>
+    </div>
+  </section>
+
+  <section>
+    <label>Full thinking trace (plan + each chunk edit)</label>
+    <pre id="thinkingTraceOut" class="log" style="max-height:380px;">—</pre>
+  </section>
+
+  <section>
+    <label>Chunks (paths + proposed preview)</label>
+    <pre id="chunksOut">—</pre>
+  </section>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const api = (path, opts) => fetch(path, opts).then((r) => {
+      if (!r.ok) return r.text().then((t) => { throw new Error(t || r.status); });
+      return r.json();
+    });
+
+    const LS_WS = "bookWorkspace";
+    const LS_PRESET = "bookGoalPreset";
+    const LS_GOAL = "bookUserGoal";
+    const LS_OC = "bookUseOpenclaw";
+    const LS_OC_TOOL = "bookOpenclawTool";
+    const LS_OC_ARGS = "bookOpenclawArgs";
+    const LS_MS_CHUNK = "bookMsSelectedChunk";
+    const LS_INCLUDE_MS = "bookIncludeMsRun";
+    const LS_STUDIO_USER = "bookStudioUserId";
+    const LS_GUIDED_THREAD = "bookSupThreadGuided";
+    const LS_LLM = "bookLlmProvider";
+
+    let studioUserId = parseInt(localStorage.getItem(LS_STUDIO_USER) || "0", 10) || 0;
+    let guidedThreadId = localStorage.getItem(LS_GUIDED_THREAD) || "";
+
+    function sessionQs() {
+      const w = msWs();
+      return w ? `?workspace=${encodeURIComponent(w)}` : "";
+    }
+
+    function workspaceFromUrl() {
+      return new URLSearchParams(location.search).get("workspace") || "";
+    }
+
+    function persistWorkspace() {
+      const w = $("workspace").value.trim();
+      const m = $("msWorkspace").value.trim();
+      const v = w || m;
+      if (v) localStorage.setItem(LS_WS, v);
+    }
+
+    function applyWorkspaceToBoth(val) {
+      const v = (val || "").trim();
+      $("workspace").value = v;
+      $("msWorkspace").value = v;
+    }
+
+    async function initWorkspace() {
+      const fromUrl = workspaceFromUrl();
+      const fromLs = localStorage.getItem(LS_WS) || "";
+      let fromServer = "";
+      try {
+        const d = await api("/api/ui-defaults");
+        fromServer = (d.workspace || "").trim();
+      } catch (e) { /* offline */ }
+      const chosen = fromUrl || fromLs || fromServer;
+      applyWorkspaceToBoth(chosen);
+      if (chosen) persistWorkspace();
+    }
+
+    function llmPick() {
+      return ($("llmProvider") && $("llmProvider").value) ? $("llmProvider").value : "ollama";
+    }
+
+    function updateUsagePanelTitle() {
+      const hint = $("usagePanelHint");
+      if (!hint) return;
+      const p = llmPick();
+      if (p === "anthropic") {
+        hint.textContent = "UI selection: Anthropic — totals below include anthropic_usage.jsonl first. Ollama lines are from earlier runs if any.";
+      } else {
+        hint.textContent = "UI selection: Ollama — totals include ollama_usage.jsonl. Anthropic lines appear only after API runs.";
+      }
+    }
+
+    async function refreshLlmHint() {
+      const ws = ($("workspace").value.trim() || msWs() || "").trim();
+      if (!ws) {
+        $("llmHint").textContent = "Set workspace to see provider defaults and whether ANTHROPIC_API_KEY loaded.";
+        return;
+      }
+      try {
+        const d = await api(`/api/workspace-llm?workspace=${encodeURIComponent(ws)}`);
+        $("llmHint").textContent = `UI run uses: ${llmPick()} · workspace default: ${d.llm_provider} · Ollama: ${d.ollama_model} · Anthropic model: ${d.anthropic_model}, thinking=${d.anthropic_thinking}, key in env: ${d.anthropic_api_key_configured ? "yes" : "no"}`;
+      } catch (e) {
+        $("llmHint").textContent = "Could not read workspace LLM config.";
+      }
+    }
+
+    const savedPreset = localStorage.getItem(LS_PRESET);
+    if (savedPreset) {
+      const sel = $("preset");
+      if ([...sel.options].some((o) => o.value === savedPreset)) sel.value = savedPreset;
+    }
+
+    const savedGoal = localStorage.getItem(LS_GOAL);
+    if (savedGoal) $("goal").value = savedGoal;
+
+    $("preset").addEventListener("change", () => localStorage.setItem(LS_PRESET, $("preset").value));
+
+    let goalSaveTimer = null;
+    $("goal").addEventListener("input", () => {
+      clearTimeout(goalSaveTimer);
+      goalSaveTimer = setTimeout(() => localStorage.setItem(LS_GOAL, $("goal").value), 400);
+    });
+    $("goal").addEventListener("blur", () => localStorage.setItem(LS_GOAL, $("goal").value));
+
+    $("useOc").checked = localStorage.getItem(LS_OC) === "1";
+    $("ocTool").value = localStorage.getItem(LS_OC_TOOL) || "";
+    $("ocArgs").value = localStorage.getItem(LS_OC_ARGS) || "{}";
+
+    $("useOc").onchange = () => {
+      const on = $("useOc").checked;
+      $("ocTool").disabled = !on;
+      $("ocArgs").disabled = !on;
+      localStorage.setItem(LS_OC, on ? "1" : "0");
+    };
+    $("ocTool").addEventListener("input", () => localStorage.setItem(LS_OC_TOOL, $("ocTool").value));
+    $("ocTool").addEventListener("change", () => localStorage.setItem(LS_OC_TOOL, $("ocTool").value));
+    $("ocArgs").addEventListener("input", () => localStorage.setItem(LS_OC_ARGS, $("ocArgs").value));
+    $("ocArgs").addEventListener("change", () => localStorage.setItem(LS_OC_ARGS, $("ocArgs").value));
+
+    $("useOc").onchange();
+
+    const llmSel = $("llmProvider");
+    const savedLlm = localStorage.getItem(LS_LLM);
+    if (savedLlm && llmSel && [...llmSel.options].some((o) => o.value === savedLlm)) llmSel.value = savedLlm;
+    if (llmSel) {
+      llmSel.addEventListener("change", () => {
+        localStorage.setItem(LS_LLM, llmSel.value);
+        refreshLlmHint();
+        void refreshUsage();
+        updateUsagePanelTitle();
+      });
+    }
+    $("btnLlmHintRefresh").onclick = () => refreshLlmHint();
+
+    let threadId = localStorage.getItem("bookSupThread") || "";
+    let msSessionId = localStorage.getItem("bookMsSession") || "";
+    const _chunkSaved = parseInt(localStorage.getItem(LS_MS_CHUNK) || "0", 10);
+    let msSelectedChunk = Number.isFinite(_chunkSaved) && _chunkSaved >= 0 ? _chunkSaved : 0;
+    let msPollTimer = null;
+    let lastMsSession = null;
+
+    async function applySupervisorState(st, tid, runTagEl, threadTagEl, guided) {
+      if (threadTagEl) threadTagEl.textContent = (guided ? "guided thread: " : "thread: ") + (tid ? tid.slice(0, 10) + "…" : "—");
+      const v = st.values || {};
+      $("planOut").textContent = v.plan_markdown || "—";
+      if ($("planThinkingOut")) $("planThinkingOut").textContent = (v.plan_thinking && v.plan_thinking.trim()) ? v.plan_thinking : "—";
+      const tr = v.thinking_trace || [];
+      if ($("thinkingTraceOut")) $("thinkingTraceOut").textContent = tr.length ? tr.join("\n\n---\n\n") : "—";
+      $("logOut").textContent = (v.log || []).join("\n") || "—";
+      const chunks = v.chunks || [];
+      $("chunksOut").textContent = chunks.length
+        ? chunks.map((c) => c.path + "\n  status: " + (c.status || "") + "\n  preview: " + (c.proposed || "").slice(0, 400) + (c.proposed && c.proposed.length > 400 ? "…" : "")).join("\n\n")
+        : "—";
+      if (runTagEl && !guided) {
+        const rs = await api(`/api/supervisor/status/${encodeURIComponent(tid)}`).catch(() => ({ run: "" }));
+        runTagEl.textContent = "run: " + (rs.run || "?");
+        runTagEl.className = "tag " + (rs.run === "done" ? "ok" : rs.run === "running" ? "" : rs.run && rs.run.startsWith("error") ? "err" : "");
+      }
+    }
+
+    async function pollState() {
+      const ws = $("workspace").value.trim();
+      if (!threadId || !ws) return;
+      try {
+        const st = await api(`/api/supervisor/state/${encodeURIComponent(threadId)}?workspace=${encodeURIComponent(ws)}`);
+        await applySupervisorState(st, threadId, $("runTag"), $("threadTag"), false);
+      } catch (e) {
+        $("logOut").textContent = "poll error: " + e.message;
+      }
+    }
+
+    async function pollGuidedState() {
+      const ws = $("workspace").value.trim();
+      if (!guidedThreadId || !ws) return;
+      try {
+        const st = await api(`/api/supervisor/state/${encodeURIComponent(guidedThreadId)}?workspace=${encodeURIComponent(ws)}&guided=1`);
+        await applySupervisorState(st, guidedThreadId, null, $("guidedThreadTag"), true);
+        const pending = (st.next || []).length;
+        $("guidedStatusTag").textContent = pending ? "guided: paused (next step available)" : "guided: idle / done";
+      } catch (e) {
+        $("guidedStatusTag").textContent = "guided: error";
+      }
+    }
+
+    async function studioBootstrap() {
+      try {
+        const d = await api("/api/studio/bootstrap");
+        studioUserId = d.user_id || 1;
+        localStorage.setItem(LS_STUDIO_USER, String(studioUserId));
+        $("studioUserTag").textContent = "user id: " + studioUserId;
+        $("studioDisplayName").value = d.display_name || "local";
+        $("studioPaths").textContent = "db: " + (d.studio_db || "") + "\nprojects: " + (d.projects_root || "");
+      } catch (e) {
+        $("studioUserTag").textContent = "studio: offline";
+      }
+    }
+
+    async function refreshProjectsList() {
+      if (!studioUserId) await studioBootstrap();
+      try {
+        const d = await api(`/api/studio/projects?user_id=${encodeURIComponent(studioUserId)}`);
+        const sel = $("projectSelect");
+        sel.innerHTML = '<option value="">— Select project —</option>';
+        (d.projects || []).forEach((p) => {
+          const o = document.createElement("option");
+          o.value = p.workspace_path;
+          o.textContent = (p.name || "project") + "  ·  " + (p.slug || "");
+          o.dataset.projectId = String(p.id);
+          sel.appendChild(o);
+        });
+      } catch (e) {
+        $("projectSelect").innerHTML = '<option value="">(projects unavailable)</option>';
+      }
+    }
+
+    async function refreshUsage() {
+      updateUsagePanelTitle();
+      const ws = $("workspace").value.trim();
+      if (!ws) {
+        $("usageOut").textContent = "Set workspace to load .pipeline/ollama_usage.jsonl and anthropic_usage.jsonl.";
+        return;
+      }
+      try {
+        const d = await api(`/api/studio/usage?workspace=${encodeURIComponent(ws)}`);
+        const o = d.ollama || {};
+        const a = d.anthropic || {};
+        const c = d.cost || {};
+        const pick = llmPick();
+        const anthropicBlock = {
+          calls: a.calls,
+          input_tokens: a.prompt_tokens,
+          output_tokens: a.completion_tokens,
+          log: (a.log_path || ".pipeline/anthropic_usage.jsonl"),
+        };
+        const ollamaBlock = {
+          calls: o.calls,
+          prompt_eval_tokens: o.prompt_tokens,
+          completion_tokens: o.completion_tokens,
+          log: (o.log_path || ".pipeline/ollama_usage.jsonl"),
+        };
+        const combined = {
+          combined_prompt_tokens: d.combined_prompt_tokens,
+          combined_completion_tokens: d.combined_completion_tokens,
+          hypothetical_usd_if_rates_set: c.usd_hypothetical,
+          rates_configured: c.rates_configured,
+        };
+        const body =
+          pick === "anthropic"
+            ? {
+                ui_provider_for_new_runs: "anthropic",
+                note: "Cumulative from disk; switching provider does not erase old logs.",
+                anthropic: anthropicBlock,
+                ollama_from_earlier_runs: ollamaBlock,
+                combined,
+              }
+            : {
+                ui_provider_for_new_runs: "ollama",
+                note: "Cumulative from disk; switching provider does not erase old logs.",
+                ollama: ollamaBlock,
+                anthropic_from_earlier_runs: anthropicBlock,
+                combined,
+              };
+        $("usageOut").textContent = JSON.stringify(body, null, 2);
+      } catch (e) {
+        $("usageOut").textContent = "usage error: " + e.message;
+      }
+    }
+
+    async function refreshUsageEstimate() {
+      const ws = $("workspace").value.trim();
+      if (!ws) return;
+      const chunks = (lastMsSession && lastMsSession.chunks) ? lastMsSession.chunks.length : 6;
+      try {
+        const d = await api(
+          `/api/studio/usage-estimate?workspace=${encodeURIComponent(ws)}&chunk_count=${encodeURIComponent(String(chunks))}&include_analyze=1`,
+        );
+        $("usageEstOut").textContent = JSON.stringify(d, null, 2);
+      } catch (e) {
+        $("usageEstOut").textContent = "estimate error: " + e.message;
+      }
+    }
+
+    async function memoryReloadTree() {
+      const ws = $("workspace").value.trim();
+      const sel = $("memoryFileSelect");
+      sel.innerHTML = "";
+      if (!ws) return;
+      try {
+        const d = await api(`/api/studio/memory-tree?workspace=${encodeURIComponent(ws)}`);
+        (d.files || []).forEach((f) => {
+          const o = document.createElement("option");
+          o.value = f.path;
+          o.textContent = f.path + "  (" + f.size + " B)";
+          sel.appendChild(o);
+        });
+      } catch (e) {
+        const o = document.createElement("option");
+        o.textContent = "(tree failed)";
+        sel.appendChild(o);
+      }
+    }
+
+    $("btnMemoryReload").onclick = () => memoryReloadTree();
+    $("btnMemoryLoad").onclick = async () => {
+      const ws = $("workspace").value.trim();
+      const path = ($("memoryFileSelect").value || "").trim();
+      if (!ws || !path) { alert("workspace and memory file required"); return; }
+      try {
+        const d = await api(`/api/studio/memory-file?workspace=${encodeURIComponent(ws)}&path=${encodeURIComponent(path)}`);
+        $("memoryEditor").value = d.content || "";
+        $("memoryPathTag").textContent = "path: " + path;
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+    $("btnMemorySave").onclick = async () => {
+      const ws = $("workspace").value.trim();
+      const path = ($("memoryFileSelect").value || "").trim();
+      if (!ws || !path) { alert("workspace and memory file required"); return; }
+      try {
+        await api("/api/studio/memory-file", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace: ws, path, content: $("memoryEditor").value }),
+        });
+        $("memoryPathTag").textContent = "saved: " + path;
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("studioSaveMe").onclick = async () => {
+      if (!studioUserId) await studioBootstrap();
+      try {
+        await api(`/api/studio/me?user_id=${encodeURIComponent(studioUserId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ display_name: $("studioDisplayName").value.trim() || "local" }),
+        });
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("btnCreateProject").onclick = async () => {
+      const name = $("newProjectName").value.trim();
+      if (!name) { alert("Project name required"); return; }
+      if (!studioUserId) await studioBootstrap();
+      try {
+        const out = await api("/api/studio/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: studioUserId, name }),
+        });
+        applyWorkspaceToBoth(out.workspace);
+        persistWorkspace();
+        $("newProjectName").value = "";
+        await refreshProjectsList();
+        await memoryReloadTree();
+        await refreshUsage();
+        await refreshUsageEstimate();
+        await refreshLlmHint();
+        await loadMsRecent();
+        alert("Created project at:\n" + out.workspace);
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("btnRefreshProjects").onclick = () => refreshProjectsList();
+    $("btnRefreshUsage").onclick = () => { refreshUsage(); refreshUsageEstimate(); };
+
+    $("projectSelect").onchange = async () => {
+      const v = $("projectSelect").value;
+      if (!v) return;
+      applyWorkspaceToBoth(v);
+      persistWorkspace();
+      await memoryReloadTree();
+      await refreshUsage();
+      await refreshUsageEstimate();
+      await refreshLlmHint();
+      await loadMsRecent();
+    };
+
+    $("btnRun").onclick = async () => {
+      const ws = $("workspace").value.trim();
+      if (!ws) { alert("workspace required"); return; }
+      $("btnRun").disabled = true;
+      try {
+        const body = {
+          workspace: ws,
+          llm_provider: llmPick(),
+          thread_id: threadId || undefined,
+          user_goal: $("goal").value,
+          goal_preset: $("preset").value,
+          use_openclaw_after_plan: $("useOc").checked,
+          openclaw_tool: $("ocTool").value.trim(),
+          openclaw_args_json: $("ocArgs").value.trim() || "{}",
+          manuscript_session_id: ($("includeMsSession").checked && msSessionId) ? msSessionId : "",
+          include_manuscript_notes: $("includeMsSession").checked,
+        };
+        const out = await api("/api/supervisor/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        threadId = out.thread_id;
+        localStorage.setItem("bookSupThread", threadId);
+        persistWorkspace();
+        $("threadTag").textContent = "thread: " + threadId;
+        $("runTag").textContent = "run: started";
+        const iv = setInterval(async () => {
+          await pollState();
+          const rs = await api(`/api/supervisor/status/${encodeURIComponent(threadId)}`).catch(() => ({ run: "" }));
+          if (rs.run && rs.run !== "running") clearInterval(iv);
+        }, 2000);
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        $("btnRun").disabled = false;
+      }
+    };
+
+    $("btnPoll").onclick = () => pollState();
+    $("btnMerge").onclick = async () => {
+      const ws = $("workspace").value.trim();
+      try {
+        await api("/api/supervisor/merge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace: ws }),
+        });
+        alert("Copied outputs/staging_merged.md → manuscript/canonical_merged.md");
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("btnNew").onclick = () => {
+      threadId = "";
+      localStorage.removeItem("bookSupThread");
+      $("threadTag").textContent = "thread: (new on next run)";
+    };
+
+    $("btnGuidedNew").onclick = () => {
+      guidedThreadId = "";
+      localStorage.removeItem(LS_GUIDED_THREAD);
+      $("guidedThreadTag").textContent = "guided thread: (new on next step)";
+      $("guidedStatusTag").textContent = "guided: idle";
+    };
+
+    $("btnGuidedStep").onclick = async () => {
+      const ws = $("workspace").value.trim();
+      if (!ws) { alert("workspace required"); return; }
+      $("btnGuidedStep").disabled = true;
+      $("guidedStatusTag").textContent = "guided: running…";
+      try {
+        const body = {
+          workspace: ws,
+          llm_provider: llmPick(),
+          thread_id: guidedThreadId || undefined,
+          user_goal: $("goal").value,
+          goal_preset: $("preset").value,
+          use_openclaw_after_plan: $("useOc").checked,
+          openclaw_tool: $("ocTool").value.trim(),
+          openclaw_args_json: $("ocArgs").value.trim() || "{}",
+          manuscript_session_id: ($("includeMsSession").checked && msSessionId) ? msSessionId : "",
+          include_manuscript_notes: $("includeMsSession").checked,
+        };
+        const out = await api("/api/supervisor/guided/step", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        guidedThreadId = out.thread_id;
+        localStorage.setItem(LS_GUIDED_THREAD, guidedThreadId);
+        $("guidedThreadTag").textContent = "guided thread: " + guidedThreadId.slice(0, 10) + "…";
+        $("guidedStatusTag").textContent = "guided: " + (out.status || "?");
+        if (out.values) {
+          const wrap = { values: out.values };
+          await applySupervisorState(wrap, guidedThreadId, null, $("guidedThreadTag"), true);
+        }
+        await pollGuidedState();
+      } catch (e) {
+        alert(e.message);
+        $("guidedStatusTag").textContent = "guided: error";
+      } finally {
+        $("btnGuidedStep").disabled = false;
+      }
+    };
+
+    function msWs() {
+      const a = $("msWorkspace").value.trim();
+      const b = $("workspace").value.trim();
+      return a || b;
+    }
+
+    function renderMsChunks() {
+      const sess = lastMsSession;
+      const host = $("msChunks");
+      host.innerHTML = "";
+      if (!sess) {
+        host.textContent = "Upload a file to see chunks.";
+        return;
+      }
+      const chunks = sess.chunks || [];
+      if (!chunks.length) {
+        host.textContent = "No chunks.";
+        return;
+      }
+      chunks.forEach((c) => {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "chunk-card" + (Number(c.id) === msSelectedChunk ? " active" : "");
+        card.innerHTML = `<div class="chunk-meta">Chunk ${Number(c.id) + 1} · ${c.word_count || 0} words</div><div class="chunk-prev"></div>`;
+        card.querySelector(".chunk-prev").textContent = c.preview || "";
+        card.onclick = () => {
+          msSelectedChunk = Number(c.id);
+          localStorage.setItem(LS_MS_CHUNK, String(msSelectedChunk));
+          renderMsChunks();
+          $("msNote").disabled = false;
+          $("msAddNote").disabled = false;
+        };
+        host.appendChild(card);
+      });
+    }
+
+    function renderMsComments(sess) {
+      const box = $("msComments");
+      box.innerHTML = "";
+      const list = sess.comments || [];
+      if (!list.length) {
+        box.textContent = "No notes yet.";
+        return;
+      }
+      list.slice().reverse().forEach((c) => {
+        const wrap = document.createElement("div");
+        wrap.className = "comment-item";
+        wrap.innerHTML = `<div><small>Chunk ${Number(c.chunk_id) + 1}</small></div><div></div><div style="margin-top:0.35rem;"><button type="button" class="ghost" style="width:auto;padding:0.2rem 0.5rem;font-size:0.75rem;">Remove</button></div>`;
+        wrap.querySelector("div:nth-child(2)").textContent = c.body || "";
+        const btn = wrap.querySelector("button");
+        btn.onclick = async () => {
+          try {
+            await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}/comments/${encodeURIComponent(c.id)}${sessionQs()}`, { method: "DELETE" });
+            await refreshMsSession();
+          } catch (e) {
+            alert(e.message);
+          }
+        };
+        box.appendChild(wrap);
+      });
+    }
+
+    async function refreshMsSession() {
+      if (!msSessionId) return;
+      const sess = await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}${sessionQs()}`);
+      lastMsSession = sess;
+      $("msTag").textContent = "session: " + msSessionId.slice(0, 8) + "…";
+      const st = sess.analyze_status || "idle";
+      $("msRun").textContent = "analyze: " + st;
+      $("msRun").className = "tag " + (st === "done" ? "ok" : st === "error" ? "err" : st === "running" ? "" : "");
+      $("msStructure").textContent = sess.structure_markdown || (st === "running" ? "Analyzing…" : "—");
+      const ins = sess.chunk_insights || [];
+      $("msInsights").textContent = ins.length
+        ? ins.map((x) => `---\nChunk group ${Number(x.id) + 1}\n${(x.markdown || "").trim()}`).join("\n\n")
+        : "—";
+      $("msAnalyzeThinking").textContent = (sess.analyze_thinking && String(sess.analyze_thinking).trim())
+        ? sess.analyze_thinking
+        : "—";
+      if (sess.analyze_error && st === "error") {
+        $("msStructure").textContent = "Error: " + sess.analyze_error;
+      }
+      const ch = sess.chunks || [];
+      if (ch.length && msSelectedChunk >= ch.length) msSelectedChunk = 0;
+      renderMsChunks();
+      renderMsComments(sess);
+      $("msCommit").disabled = false;
+      $("msGlobalNote").disabled = false;
+      $("msSaveGlobal").disabled = false;
+      $("msGlobalNote").value = sess.global_note || "";
+      return sess;
+    }
+
+    $("msPick").onclick = () => $("msFile").click();
+
+    $("msFile").onchange = async () => {
+      const f = $("msFile").files && $("msFile").files[0];
+      if (!f) return;
+      const fd = new FormData();
+      fd.append("workspace", msWs());
+      fd.append("file", f, f.name);
+      try {
+        const out = await api("/api/manuscript/upload", { method: "POST", body: fd });
+        msSessionId = out.session_id;
+        localStorage.setItem("bookMsSession", msSessionId);
+        msSelectedChunk = 0;
+        localStorage.setItem(LS_MS_CHUNK, "0");
+        persistWorkspace();
+        $("msAnalyze").disabled = false;
+        $("msGoal").disabled = false;
+        $("msNote").disabled = false;
+        $("msAddNote").disabled = false;
+        $("msCommit").disabled = false;
+        $("msGlobalNote").disabled = false;
+        $("msSaveGlobal").disabled = false;
+        $("msStructure").textContent = "—";
+        $("msInsights").textContent = "—";
+        await refreshMsSession();
+        loadMsRecent();
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        $("msFile").value = "";
+      }
+    };
+
+    $("msAnalyze").onclick = async () => {
+      if (!msSessionId) return;
+      $("msAnalyze").disabled = true;
+      try {
+        const wsQ = msWs() ? `?workspace=${encodeURIComponent(msWs())}` : "";
+        await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}/analyze${wsQ}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace: msWs(), llm_provider: llmPick() }),
+        });
+        if (msPollTimer) clearInterval(msPollTimer);
+        msPollTimer = setInterval(async () => {
+          const s = await refreshMsSession().catch(() => null);
+          if (!s) return;
+          if (s.analyze_status && s.analyze_status !== "running") {
+            clearInterval(msPollTimer);
+            msPollTimer = null;
+            $("msAnalyze").disabled = false;
+          }
+        }, 1500);
+      } catch (e) {
+        alert(e.message);
+        $("msAnalyze").disabled = false;
+      }
+    };
+
+    $("msAddNote").onclick = async () => {
+      if (!msSessionId) return;
+      const body = $("msNote").value.trim();
+      if (!body) { alert("Write a note first"); return; }
+      try {
+        await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}/comments${sessionQs()}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chunk_id: msSelectedChunk, body }),
+        });
+        $("msNote").value = "";
+        await refreshMsSession();
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("msGoal").onclick = async () => {
+      if (!msSessionId) return;
+      try {
+        const g = await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}/goal-block${sessionQs()}`);
+        const block = (g.text || "").trim();
+        if (!block) { alert("No notes to append"); return; }
+        const cur = $("goal").value.trim();
+        $("goal").value = cur ? (cur + "\n\n" + block) : block;
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("includeMsSession").addEventListener("change", () => {
+      localStorage.setItem(LS_INCLUDE_MS, $("includeMsSession").checked ? "1" : "0");
+    });
+
+    async function loadMsRecent() {
+      const sel = $("msRecent");
+      const w = msWs();
+      if (!w) {
+        sel.innerHTML = '<option value="">— Set workspace —</option>';
+        return;
+      }
+      try {
+        const d = await api(`/api/manuscript/recent?workspace=${encodeURIComponent(w)}`);
+        const cur = msSessionId;
+        sel.innerHTML = '<option value="">— Recent sessions —</option>';
+        (d.sessions || []).forEach((s) => {
+          const o = document.createElement("option");
+          o.value = s.session_id;
+          o.textContent = (s.filename || "file").slice(0, 34) + " · " + (s.word_count || 0) + "w · " + (s.comment_count || 0) + " notes";
+          if (s.session_id === cur) o.selected = true;
+          sel.appendChild(o);
+        });
+      } catch (e) {
+        sel.innerHTML = '<option value="">(recent list failed)</option>';
+      }
+    }
+
+    $("msRecent").onchange = async () => {
+      const v = $("msRecent").value;
+      if (!v) return;
+      msSessionId = v;
+      localStorage.setItem("bookMsSession", msSessionId);
+      try {
+        await refreshMsSession();
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("msRecentRefresh").onclick = () => loadMsRecent();
+
+    $("msSaveGlobal").onclick = async () => {
+      if (!msSessionId) return;
+      const w = msWs();
+      if (!w) { alert("workspace required"); return; }
+      try {
+        await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}/global-note`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace: w, text: $("msGlobalNote").value }),
+        });
+        await refreshMsSession();
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+
+    $("msCommit").onclick = async () => {
+      if (!msSessionId) return;
+      const w = msWs();
+      if (!w) { alert("workspace required"); return; }
+      $("msCommit").disabled = true;
+      try {
+        const out = await api(`/api/manuscript/session/${encodeURIComponent(msSessionId)}/commit-to-workspace`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace: w, mode: $("msCommitMode").value }),
+        });
+        $("msCommitOut").textContent = "Committed: " + (out.paths || []).join(" · ");
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        $("msCommit").disabled = false;
+      }
+    };
+
+    function syncWorkspaceFields(fromMs) {
+      if (fromMs) {
+        if (!$("workspace").value.trim()) $("workspace").value = $("msWorkspace").value;
+      } else {
+        if (!$("msWorkspace").value.trim()) $("msWorkspace").value = $("workspace").value;
+      }
+      persistWorkspace();
+      void refreshLlmHint();
+    }
+    $("workspace").addEventListener("input", () => syncWorkspaceFields(false));
+    $("workspace").addEventListener("change", () => { syncWorkspaceFields(false); loadMsRecent(); });
+    $("msWorkspace").addEventListener("input", () => syncWorkspaceFields(true));
+    $("msWorkspace").addEventListener("change", () => { syncWorkspaceFields(true); loadMsRecent(); });
+
+    (async function bootstrap() {
+      await initWorkspace();
+      await refreshLlmHint();
+      updateUsagePanelTitle();
+      await studioBootstrap();
+      await refreshProjectsList();
+      await refreshUsage();
+      await refreshUsageEstimate();
+      await memoryReloadTree();
+      $("includeMsSession").checked = localStorage.getItem(LS_INCLUDE_MS) !== "0";
+      guidedThreadId = localStorage.getItem(LS_GUIDED_THREAD) || "";
+      if (guidedThreadId) {
+        $("guidedThreadTag").textContent = "guided thread: " + guidedThreadId.slice(0, 10) + "…";
+        await pollGuidedState();
+      }
+      await loadMsRecent();
+      if (threadId) await pollState();
+      if (msSessionId) {
+        try {
+          await refreshMsSession();
+          $("msCommit").disabled = false;
+        } catch (e) {
+          msSessionId = "";
+          localStorage.removeItem("bookMsSession");
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

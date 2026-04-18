@@ -12,6 +12,8 @@ _ensure_node_on_path() {
   type -P node >/dev/null 2>&1 && return 0
 
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # Silence nvm status lines when sourcing (e.g. "default -> 22" / version hints).
+  export NVM_SILENT="${NVM_SILENT:-1}"
   [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh"
   type -P node >/dev/null 2>&1 && return 0
 

@@ -1,0 +1,89 @@
+Book pipeline — local only (Ollama gemma4:26b by default)
+=========================================================
+
+What it does
+------------
+- Pops JSON tasks from workspace/todo.file (one JSON object per line, JSONL).
+- LangGraph flow: load .memory/*.md + source document → optional OpenClaw llm-task plan → Ollama chat → write output file.
+- Supports actions: rewrite_section, netflix_script, stage_play, longform_docs, presentation_outline, insights, new_chapter, research_continue.
+- Ingest: .md, .txt, .docx (python-docx). Other formats: convert first.
+
+Setup
+-----
+  cd book-pipeline
+  python3 -m venv .venv
+  . .venv/bin/activate
+  pip install -e .
+
+Copy env.example to .env and export vars, or rely on workspace/config.yaml.
+
+Verify Ollama:
+  python -m book_pipeline verify-ollama --workspace ./workspace
+
+Enqueue a task (append one JSON line to todo.file):
+  python -m book_pipeline enqueue --workspace ./workspace --json '{"action":"insights","source":"manuscript/draft.md","output":"outputs/insights.md","instruction":"Be concise."}'
+
+Run one task manually:
+  python -m book_pipeline run-once --workspace ./workspace
+
+Split a long manuscript by ## headings into sections/:
+  python -m book_pipeline split --workspace ./workspace --file manuscript/draft.md
+
+Inotify loop (Linux)
+--------------------
+  chmod +x watch_inotify.sh
+  ./watch_inotify.sh ./workspace
+Edit todo.file (append a JSON line); the watcher debounces and calls run-once.
+
+Chaining research
+-----------------
+A task may include "chain": [ { ... next task dict ... } ]. After success, those
+dicts are appended to todo.file so the watcher picks them up.
+
+OpenClaw (optional)
+-------------------
+If gateway is running and OPENCLAW_GATEWAY_URL + OPENCLAW_GATEWAY_TOKEN are set,
+the graph calls tool llm-task once per task for a small JSON plan (stored under
+.memory/research/). Failures are ignored; all long-form text still uses Ollama.
+
+Memory layout
+-------------
+  workspace/.memory/characters/*.md   — character sheets
+  workspace/.memory/research/*.md    — notes / planner output
+
+Task JSON fields
+----------------
+  action        — one of the actions listed above
+  source        — path under workspace (default manuscript/draft.md)
+  output        — path under workspace for result
+  instruction   — free-text user goal
+  temperature   — optional float
+  chain         — optional list of follow-up task objects
+
+LangGraph supervisor + small UI (divide & conquer)
+--------------------------------------------------
+Stack: Layer 0 = LangGraph (checkpoints in workspace/.pipeline/checkpoints.sqlite),
+all planning and chunk transforms = Ollama only; optional OpenClaw = one
+/tools/invoke tool call after plan (no cloud LLM).
+
+Graph: init (sections/*.md or manuscript/draft.md) → plan (Ollama Markdown) →
+optional OpenClaw tool → edit each chunk (Ollama) → staging_merged.md.
+
+CLI one-shot:
+  python -m book_pipeline supervisor-run --workspace ./workspace \
+    --goal "Turn into a tight streaming script" --preset netflix_script
+
+Web UI:
+  python -m book_pipeline ui --workspace ./workspace --port 9876
+  # or: bash scripts/book-ui.sh   (uses venv + BOOK_UI_PORT, default 9876)
+  # or from repo root: npm run book:ui
+Open http://127.0.0.1:9876/?workspace=/ABS/PATH/book-pipeline/workspace
+If "address already in use", pick another port: --port 8767 or BOOK_UI_PORT=8767
+Use "New thread id" before each full run so checkpoints do not resume an old job.
+
+After run, "Approve → canonical_merged.md" copies outputs/staging_merged.md to
+manuscript/canonical_merged.md (human merge gate).
+
+OpenClaw tool step: set OPENCLAW_GATEWAY_URL and OPENCLAW_GATEWAY_TOKEN in the
+environment before starting the UI. Many tools are HTTP-denylisted; pick an
+allowed read-only tool or relax gateway.tools in openclaw.json.
