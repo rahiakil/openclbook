@@ -8,12 +8,15 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field, ValidationError
+
+import httpx
 
 from book_pipeline.config import Settings, load_settings
 from book_pipeline.ingest import read_document_from_bytes
@@ -26,6 +29,13 @@ from book_pipeline.manuscript_session_store import (
     persist_session,
 )
 from book_pipeline.project_scaffold import allocate_slug_dir, create_project_workspace
+from book_pipeline.project_workspace import projects_root as book_pipeline_projects_root
+from book_pipeline.projects_library_scan import (
+    list_pipeline_output_files,
+    read_artifact,
+    read_outputs_workspace_file,
+    scan_local_completed_projects,
+)
 from book_pipeline.studio_db import (
     connect,
     ensure_default_user,
@@ -107,6 +117,11 @@ def _ms_require(session_id: str, workspace_query: str = "") -> dict:
 _DEV_WORKSPACE_FALLBACK = Path("/home/papa/doc")
 
 
+def _manuscript_samples_api_base() -> str:
+    """HTTP API origin for GET /v1/manuscript-samples (no trailing slash). From env only."""
+    return (os.environ.get("MANUSCRIPT_SAMPLES_API_BASE") or "").strip().rstrip("/")
+
+
 def suggested_default_workspace() -> str:
     """
     Default book workspace for the web UI when not passed on the URL.
@@ -120,6 +135,91 @@ def suggested_default_workspace() -> str:
     if _DEV_WORKSPACE_FALLBACK.is_dir():
         return str(_DEV_WORKSPACE_FALLBACK.resolve())
     return ""
+
+
+# Request body models must be module-level — classes nested inside ``create_app()`` are not
+# fully resolved for OpenAPI/Pydantic and FastAPI returns 422 (e.g. ``loc``: ``["query", "body"]``).
+
+
+class RunBody(BaseModel):
+    workspace: str = Field(description="Absolute or relative path to book workspace")
+    llm_provider: str | None = Field(
+        default=None,
+        description="ollama | anthropic — overrides workspace config for this run",
+    )
+    thread_id: str | None = None
+    user_goal: str = ""
+    goal_preset: str = "rewrite"
+    use_openclaw_after_plan: bool = False
+    openclaw_tool: str = ""
+    openclaw_args_json: str = "{}"
+    manuscript_session_id: str | None = None
+    include_manuscript_notes: bool = True
+    # Orchestration: semantic chapter split, verify loop, optional per-chunk OpenClaw
+    user_statements_json: str = Field(
+        default="",
+        description='Optional JSON array of strings, e.g. ["Tone: …","Plot: …"]. Empty = derive from user_goal.',
+    )
+    use_semantic_division: bool = Field(
+        default=True,
+        description="Run division-of-work LLM to split a single draft into chapter chunks before plan/edit.",
+    )
+    openclaw_per_chunk: bool = Field(
+        default=False,
+        description="After each chunk LLM edit, call the same OpenClaw tool with chunk_path/excerpt args.",
+    )
+    max_revision_rounds: int = Field(
+        default=2,
+        ge=0,
+        le=8,
+        description="After staging, verifier may send graph back to re-plan/re-edit; max full cycles.",
+    )
+
+
+class MergeBody(BaseModel):
+    workspace: str
+
+
+class StudioMePatch(BaseModel):
+    display_name: str = "local"
+
+
+class CreateProjectBody(BaseModel):
+    user_id: int = 1
+    name: str = ""
+
+
+class MemoryWriteBody(BaseModel):
+    workspace: str
+    path: str = ""
+    content: str = ""
+
+
+class ManuscriptCommitBody(BaseModel):
+    workspace: str
+    mode: str = "draft"
+
+
+class ManuscriptCommentBody(BaseModel):
+    chunk_id: int = Field(ge=0)
+    body: str = ""
+
+
+class ManuscriptGlobalNoteBody(BaseModel):
+    workspace: str = ""
+    text: str = ""
+
+
+def merge_goal(ws: Path, b: RunBody) -> str:
+    with _MS_LOCK:
+        snap = dict(_MS_SESSIONS)
+    return merge_manuscript_goal_text(
+        ws,
+        b.user_goal,
+        b.manuscript_session_id,
+        b.include_manuscript_notes,
+        extra_sessions=snap,
+    )
 
 
 def create_app() -> FastAPI:
@@ -140,46 +240,33 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok": True, "studio_api": True, "app": "book_pipeline.ui_app"}
+        return {
+            "ok": True,
+            "studio_api": True,
+            "app": "book_pipeline.ui_app",
+            "manuscript_samples_proxy": bool(_manuscript_samples_api_base()),
+        }
 
     @app.get("/api/ui-defaults")
     async def ui_defaults():
         """Browser UI: suggested workspace when URL/localStorage do not set one."""
         ws = suggested_default_workspace()
-        return {"workspace": ws, "has_dev_default": bool(ws)}
-
-    class RunBody(BaseModel):
-        workspace: str = Field(description="Absolute or relative path to book workspace")
-        llm_provider: str | None = Field(
-            default=None,
-            description="ollama | anthropic — overrides workspace config for this run",
-        )
-        thread_id: str | None = None
-        user_goal: str = ""
-        goal_preset: str = "rewrite"
-        use_openclaw_after_plan: bool = False
-        openclaw_tool: str = ""
-        openclaw_args_json: str = "{}"
-        manuscript_session_id: str | None = None
-        include_manuscript_notes: bool = True
-
-    def merge_goal(ws: Path, b: RunBody) -> str:
-        with _MS_LOCK:
-            snap = dict(_MS_SESSIONS)
-        return merge_manuscript_goal_text(
-            ws,
-            b.user_goal,
-            b.manuscript_session_id,
-            b.include_manuscript_notes,
-            extra_sessions=snap,
-        )
+        pipeline_pr = book_pipeline_projects_root()
+        api_base = _manuscript_samples_api_base()
+        return {
+            "workspace": ws,
+            "has_dev_default": bool(ws),
+            "projects_root": str(pipeline_pr.resolve()),
+            "manuscript_samples_api_base": api_base or None,
+            "manuscript_samples_proxy_configured": bool(api_base),
+        }
 
     @app.post("/api/supervisor/run")
-    async def supervisor_run(body: RunBody):
-        ws = Path(body.workspace).expanduser().resolve()
+    async def supervisor_run(payload: RunBody):
+        ws = Path(payload.workspace).expanduser().resolve()
         if not ws.is_dir():
             raise HTTPException(400, f"workspace not a directory: {ws}")
-        tid = (body.thread_id or "").strip() or str(uuid.uuid4())
+        tid = (payload.thread_id or "").strip() or str(uuid.uuid4())
         with _RUN_LOCK:
             if _RUN_STATUS.get(tid) == "running":
                 raise HTTPException(409, "thread_id run already in progress")
@@ -187,16 +274,20 @@ def create_app() -> FastAPI:
 
         def work() -> None:
             try:
-                goal_final = merge_goal(ws, body)
+                goal_final = merge_goal(ws, payload)
                 run_supervisor(
                     ws,
                     thread_id=tid,
                     user_goal=goal_final,
-                    goal_preset=body.goal_preset,
-                    use_openclaw_after_plan=body.use_openclaw_after_plan,
-                    openclaw_tool=body.openclaw_tool,
-                    openclaw_args_json=body.openclaw_args_json,
-                    llm_provider=body.llm_provider,
+                    goal_preset=payload.goal_preset,
+                    use_openclaw_after_plan=payload.use_openclaw_after_plan,
+                    openclaw_tool=payload.openclaw_tool,
+                    openclaw_args_json=payload.openclaw_args_json,
+                    llm_provider=payload.llm_provider,
+                    user_statements_json=payload.user_statements_json,
+                    use_semantic_division=payload.use_semantic_division,
+                    openclaw_per_chunk=payload.openclaw_per_chunk,
+                    max_revision_rounds=payload.max_revision_rounds,
                 )
                 _RUN_STATUS[tid] = "done"
             except Exception as e:  # noqa: BLE001
@@ -231,25 +322,29 @@ def create_app() -> FastAPI:
         return jsonable_encoder(payload)
 
     @app.post("/api/supervisor/guided/step")
-    async def supervisor_guided_step_route(body: RunBody):
+    async def supervisor_guided_step_route(payload: RunBody):
         """One LangGraph step for the marathon (pause-after-chunk) supervisor — human-in-the-loop."""
-        ws = Path(body.workspace).expanduser().resolve()
+        ws = Path(payload.workspace).expanduser().resolve()
         if not ws.is_dir():
             raise HTTPException(400, f"workspace not a directory: {ws}")
-        tid = (body.thread_id or "").strip() or str(uuid.uuid4())
+        tid = (payload.thread_id or "").strip() or str(uuid.uuid4())
 
         def one() -> dict:
             with _RUN_LOCK:
-                goal_final = merge_goal(ws, body)
+                goal_final = merge_goal(ws, payload)
                 supervisor_guided_step(
                     ws,
                     tid,
                     user_goal=goal_final,
-                    goal_preset=body.goal_preset,
-                    use_openclaw_after_plan=body.use_openclaw_after_plan,
-                    openclaw_tool=body.openclaw_tool,
-                    openclaw_args_json=body.openclaw_args_json or "{}",
-                    llm_provider=body.llm_provider,
+                    goal_preset=payload.goal_preset,
+                    use_openclaw_after_plan=payload.use_openclaw_after_plan,
+                    openclaw_tool=payload.openclaw_tool,
+                    openclaw_args_json=payload.openclaw_args_json or "{}",
+                    llm_provider=payload.llm_provider,
+                    user_statements_json=payload.user_statements_json,
+                    use_semantic_division=payload.use_semantic_division,
+                    openclaw_per_chunk=payload.openclaw_per_chunk,
+                    max_revision_rounds=payload.max_revision_rounds,
                 )
                 app_m = get_supervisor_app(ws, marathon=True)
                 snap = app_m.get_state({"configurable": {"thread_id": tid}})
@@ -262,12 +357,9 @@ def create_app() -> FastAPI:
         out = await loop.run_in_executor(None, one)
         return jsonable_encoder(out)
 
-    class MergeBody(BaseModel):
-        workspace: str
-
     @app.post("/api/supervisor/merge")
-    async def supervisor_merge(body: MergeBody):
-        ws = Path(body.workspace).expanduser().resolve()
+    async def supervisor_merge(payload: MergeBody):
+        ws = Path(payload.workspace).expanduser().resolve()
         staging = ws / "outputs" / "staging_merged.md"
         if not staging.is_file():
             raise HTTPException(400, "staging outputs/staging_merged.md missing — run supervisor first")
@@ -310,9 +402,6 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "memory path escapes .memory root") from e
         return full
 
-    class StudioMePatch(BaseModel):
-        display_name: str = "local"
-
     @app.get("/api/studio/bootstrap")
     async def studio_bootstrap():
         conn = connect()
@@ -327,29 +416,39 @@ def create_app() -> FastAPI:
         }
 
     @app.patch("/api/studio/me")
-    async def studio_me_patch(body: StudioMePatch, user_id: int = Query(1, ge=1)):
+    async def studio_me_patch(payload: StudioMePatch, user_id: int = Query(1, ge=1)):
         conn = connect()
         ensure_default_user(conn)
         if get_user(conn, user_id) is None:
             conn.close()
             raise HTTPException(404, "user not found")
-        update_user_display_name(conn, user_id, body.display_name)
+        update_user_display_name(conn, user_id, payload.display_name)
         row = get_user(conn, user_id)
         conn.close()
         return {"ok": True, "user": dict(row) if row else {}}
 
-    class CreateProjectBody(BaseModel):
-        user_id: int = 1
-        name: str = ""
-
     @app.post("/api/studio/projects")
-    async def studio_create_project(body: CreateProjectBody):
-        name = (body.name or "").strip()
+    async def studio_create_project(
+        request: Request,
+        user_id: int = Query(1, ge=1),
+        name: str = Query(""),
+    ):
+        """Create a project. Prefer JSON body; if the body is empty (some proxies/clients drop it),
+        ``user_id`` and ``name`` query parameters are accepted instead."""
+        raw = await request.body()
+        if raw.strip():
+            try:
+                payload = CreateProjectBody.model_validate_json(raw)
+            except ValidationError as e:
+                raise HTTPException(status_code=422, detail=jsonable_encoder(e.errors())) from None
+        else:
+            payload = CreateProjectBody(user_id=user_id, name=name)
+        name = (payload.name or "").strip()
         if not name:
             raise HTTPException(400, "name required")
         conn = connect()
         uid = ensure_default_user(conn)
-        target_user = int(body.user_id) if body.user_id else uid
+        target_user = int(payload.user_id) if payload.user_id else uid
         if get_user(conn, target_user) is None:
             conn.close()
             raise HTTPException(404, "user not found")
@@ -439,21 +538,16 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "file not found")
         return {"path": path, "content": full.read_text(encoding="utf-8", errors="replace")}
 
-    class MemoryWriteBody(BaseModel):
-        workspace: str
-        path: str = ""
-        content: str = ""
-
     @app.put("/api/studio/memory-file")
-    async def studio_memory_file_put(body: MemoryWriteBody):
-        ws = Path(body.workspace).expanduser().resolve()
+    async def studio_memory_file_put(payload: MemoryWriteBody):
+        ws = Path(payload.workspace).expanduser().resolve()
         if not ws.is_dir():
             raise HTTPException(400, "bad workspace")
         _ws2, settings = _ms_settings(str(ws))
-        full = _safe_memory_path(body.path, settings)
+        full = _safe_memory_path(payload.path, settings)
         full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(body.content, encoding="utf-8")
-        return {"ok": True, "path": body.path}
+        full.write_text(payload.content, encoding="utf-8")
+        return {"ok": True, "path": payload.path}
 
     @app.post("/api/manuscript/upload")
     async def manuscript_upload(
@@ -527,18 +621,14 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "bad workspace")
         return {"sessions": list_session_meta(ws, limit=40)}
 
-    class ManuscriptCommitBody(BaseModel):
-        workspace: str
-        mode: str = "draft"  # draft | sections
-
     @app.post("/api/manuscript/session/{session_id}/commit-to-workspace")
-    async def manuscript_commit_to_workspace(session_id: str, body: ManuscriptCommitBody):
-        ws = Path(body.workspace).expanduser().resolve()
+    async def manuscript_commit_to_workspace(session_id: str, payload: ManuscriptCommitBody):
+        ws = Path(payload.workspace).expanduser().resolve()
         if not ws.is_dir():
             raise HTTPException(400, f"workspace not a directory: {ws}")
         s = _ms_require(session_id, str(ws))
         try:
-            out = commit_manuscript_session(ws, s, mode=body.mode)
+            out = commit_manuscript_session(ws, s, mode=payload.mode)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         s["last_commit"] = {"ts": time.time(), "paths": out.get("paths"), "mode": out.get("mode")}
@@ -608,25 +698,21 @@ def create_app() -> FastAPI:
         threading.Thread(target=work, daemon=True).start()
         return {"session_id": session_id, "status": "started"}
 
-    class ManuscriptCommentBody(BaseModel):
-        chunk_id: int = Field(ge=0)
-        body: str = ""
-
     @app.post("/api/manuscript/session/{session_id}/comments")
     async def manuscript_add_comment(
         session_id: str,
-        body: ManuscriptCommentBody,
+        payload: ManuscriptCommentBody,
         workspace: str = Query(""),
     ):
-        note = (body.body or "").strip()
+        note = (payload.body or "").strip()
         if not note:
             raise HTTPException(400, "comment body required")
         cid = str(uuid.uuid4())
         s = _ms_require(session_id, workspace)
         chunks = s.get("chunks") or []
-        if body.chunk_id >= len(chunks):
+        if payload.chunk_id >= len(chunks):
             raise HTTPException(400, "chunk_id out of range")
-        rec = {"id": cid, "chunk_id": body.chunk_id, "body": note, "ts": time.time()}
+        rec = {"id": cid, "chunk_id": payload.chunk_id, "body": note, "ts": time.time()}
         s.setdefault("comments", []).append(rec)
         _ms_put(s)
         return {"ok": True, "comment": rec}
@@ -646,19 +732,15 @@ def create_app() -> FastAPI:
         _ms_put(s)
         return {"ok": True}
 
-    class ManuscriptGlobalNoteBody(BaseModel):
-        workspace: str = ""
-        text: str = ""
-
     @app.post("/api/manuscript/session/{session_id}/global-note")
     async def manuscript_global_note(
         session_id: str,
-        body: ManuscriptGlobalNoteBody,
+        payload: ManuscriptGlobalNoteBody,
         workspace: str = Query(""),
     ):
-        wq = (body.workspace or workspace or "").strip()
+        wq = (payload.workspace or workspace or "").strip()
         s = _ms_require(session_id, wq)
-        s["global_note"] = body.text or ""
+        s["global_note"] = payload.text or ""
         _ms_put(s)
         return {"ok": True}
 
@@ -667,6 +749,81 @@ def create_app() -> FastAPI:
         s = _ms_require(session_id, workspace)
         block = comments_to_goal_block(list(s.get("comments") or []))
         return {"text": block}
+
+    @app.get("/api/projects-library/local")
+    async def projects_library_local():
+        """Scan ``projects_root()`` for workspaces with draft / staging / export files."""
+        return scan_local_completed_projects()
+
+    @app.get("/api/projects-library/artifact")
+    async def projects_library_artifact(
+        workspace: str = Query(..., min_length=1),
+        kind: str = Query(..., min_length=1, description="draft | canonical | staging | converted"),
+    ):
+        ws = Path(workspace).expanduser().resolve()
+        try:
+            rel, text = read_artifact(ws, kind)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        return {"path": rel, "content": text}
+
+    @app.get("/api/projects-library/pipeline-stages")
+    async def projects_library_pipeline_stages(workspace: str = Query(..., min_length=1)):
+        """List ``outputs/**/*.md|txt|json`` (e.g. per-chunk ``staging_chunks/`` snapshots)."""
+        ws = Path(workspace).expanduser().resolve()
+        if not ws.is_dir():
+            raise HTTPException(400, "bad workspace")
+        return list_pipeline_output_files(ws)
+
+    @app.get("/api/projects-library/output-file")
+    async def projects_library_output_file(
+        workspace: str = Query(..., min_length=1),
+        path: str = Query(..., min_length=1, description="Relative path under workspace, must start with outputs/"),
+    ):
+        ws = Path(workspace).expanduser().resolve()
+        try:
+            rel, text = read_outputs_workspace_file(ws, path)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        return {"path": rel, "content": text}
+
+    @app.get("/api/manuscript-samples/proxy/catalog")
+    async def manuscript_samples_proxy_catalog(request: Request):
+        """Forward GET /v1/manuscript-samples (optional ``Authorization: Bearer`` from client)."""
+        base = _manuscript_samples_api_base()
+        if not base:
+            raise HTTPException(
+                503,
+                "MANUSCRIPT_SAMPLES_API_BASE is not set (HTTP API origin only, no trailing slash)",
+            )
+        auth = (request.headers.get("authorization") or request.headers.get("Authorization") or "").strip()
+        headers: dict[str, str] = {}
+        if auth:
+            headers["Authorization"] = auth
+        url = f"{base}/v1/manuscript-samples"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.get(url, headers=headers)
+        ct = r.headers.get("content-type") or "application/json"
+        return Response(content=r.content, status_code=r.status_code, media_type=ct)
+
+    @app.get("/api/manuscript-samples/proxy/project/{project_id}")
+    async def manuscript_samples_proxy_project(project_id: str, request: Request):
+        """Forward GET /v1/manuscript-samples/{projectId} (fresh presigned URLs)."""
+        base = _manuscript_samples_api_base()
+        if not base:
+            raise HTTPException(503, "MANUSCRIPT_SAMPLES_API_BASE is not set")
+        pid = (project_id or "").strip()
+        if not pid or ".." in pid:
+            raise HTTPException(400, "invalid project_id")
+        auth = (request.headers.get("authorization") or request.headers.get("Authorization") or "").strip()
+        headers: dict[str, str] = {}
+        if auth:
+            headers["Authorization"] = auth
+        url = f"{base}/v1/manuscript-samples/{quote(pid, safe='')}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.get(url, headers=headers)
+        ct = r.headers.get("content-type") or "application/json"
+        return Response(content=r.content, status_code=r.status_code, media_type=ct)
 
     return app
 

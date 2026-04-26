@@ -112,6 +112,43 @@
     @media (max-width: 900px) { .split-2 { grid-template-columns: 1fr; } }
     .trace-grid { display: grid; gap: 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
     @media (max-width: 1100px) { .trace-grid { grid-template-columns: 1fr; } }
+
+    .library-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .library-table th, .library-table td {
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.55rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    .library-table th { color: var(--muted); font-weight: 600; }
+    .library-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .library-overlay.open { display: flex; }
+    .library-modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      max-width: min(960px, 100%);
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      min-width: min(480px, 100%);
+    }
+    .library-modal pre {
+      flex: 1;
+      max-height: 75vh;
+      margin: 0;
+      border: none;
+      border-radius: 0;
+    }
   </style>
 </head>
 <body>
@@ -183,6 +220,67 @@
       </div>
     </div>
   </section>
+
+  <section>
+    <h2>Local &amp; published library</h2>
+    <p class="sub">
+      <strong>Local disk</strong> — this table scans <code>BOOK_PIPELINE_PROJECTS_DIR</code> (see <code class="mono" id="libProjectsRoot">—</code>).
+      Nothing here is pulled from S3 automatically: uploads go <em>out</em> via <code>scripts/upload_completed_manuscripts_s3.py</code> (operator/CI);
+      the marketing site reads presigned URLs from your HTTP API.
+      <strong>Batch order</strong> comes from <code>gutenberg_library/manifest.json</code> (or <code>BOOK_GUTENDEX_MANIFEST</code>) when present — same sequence as <code>gutendex_process_batch.py</code>.
+      There is <strong>no “submit book”</strong> button in this supervisor UI yet: runs are started from here (full/guided pipeline) or from the CLI; human gates use markdown files (e.g. <code>outputs/plan_for_review.md</code>) plus <code>--prep-resume</code> / plan gate flows where implemented.
+    </p>
+    <div id="libraryManifestSummary" style="margin-bottom:0.65rem;"></div>
+    <div class="toolbar pill-row" style="margin-bottom:0.5rem;">
+      <label style="margin:0;width:auto;flex:0 0 auto;">Bearer</label>
+      <input id="libraryBearer" type="password" class="grow" placeholder="Optional — stored in localStorage only" autocomplete="off" />
+      <button type="button" class="secondary" id="btnLibraryRefresh" style="margin-top:0;">Refresh</button>
+    </div>
+    <p class="sub mono" id="libraryHint" style="margin:0 0 0.5rem;">—</p>
+    <div style="overflow:auto;">
+      <table class="library-table" id="libraryTable">
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th>Queue</th>
+            <th>Sources</th>
+            <th>Brief</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="libraryTbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="library-overlay" id="libraryOverlay" aria-hidden="true">
+    <div class="library-modal">
+      <div class="toolbar pill-row" style="padding:0.6rem 0.75rem;border-bottom:1px solid var(--border);">
+        <span class="grow mono" id="libraryModalTitle" style="font-size:0.8rem;">—</span>
+        <button type="button" class="ghost" id="libraryModalClose" style="margin-top:0;width:auto;">Close</button>
+      </div>
+      <pre id="libraryModalBody" class="log"></pre>
+    </div>
+  </div>
+
+  <div class="library-overlay" id="pipelineOverlay" aria-hidden="true">
+    <div class="library-modal" style="max-width: min(1020px, 100%);">
+      <div class="toolbar pill-row" style="padding:0.6rem 0.75rem;border-bottom:1px solid var(--border);">
+        <span class="grow mono" id="pipelineModalTitle" style="font-size:0.78rem;">—</span>
+        <button type="button" class="ghost" id="pipelineModalClose" style="margin-top:0;width:auto;">Close</button>
+      </div>
+      <div class="split-2" style="padding:0.5rem 0.65rem; max-height: 72vh; align-items: stretch;">
+        <div style="min-width: 0;">
+          <label style="margin-bottom:0.35rem;">outputs/ (chunk snapshots + plans)</label>
+          <ul id="pipelineFileList" style="list-style: none; padding: 0; margin: 0; max-height: 64vh; overflow: auto; font-size: 0.76rem;"></ul>
+        </div>
+        <div style="min-width: 0;">
+          <label style="margin-bottom:0.35rem;">File contents</label>
+          <pre id="pipelineFileBody" class="log" style="max-height: 64vh; margin: 0;">Pick a file…</pre>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <section>
     <h2>Manuscript lab</h2>
@@ -260,6 +358,10 @@
       <select id="preset">
         <option value="rewrite">Line edit / rewrite</option>
         <option value="netflix_script">Netflix-style script</option>
+        <option value="korean_drama_script">Korean drama–style script (English)</option>
+        <option value="feature_film">Feature film screenplay</option>
+        <option value="tv_episodic_arcs">TV episodic + arc bible</option>
+        <option value="translation_adapt">Translation + cultural adaptation</option>
         <option value="stage_play">Stage play</option>
         <option value="docs">Long-form documentation</option>
       </select>
@@ -296,6 +398,26 @@
     </label>
   </section>
 
+  <section>
+    <h2 style="font-size:1rem; margin-bottom:0.45rem;">Orchestration</h2>
+    <p class="sub" style="margin-bottom:0.65rem;">
+      <strong>Division of work</strong> (LLM) splits a single long draft into chapter-sized chunks when you do not already use multiple <code>sections/*.md</code> files.
+      Then: plan → optional OpenClaw → <strong>edit all chunks</strong> (parallel on full run; one-by-one on guided) → staging → <strong>verify</strong> (LLM rubric against your statements) → retry re-plan/re-edit up to the max rounds.
+    </p>
+    <label class="row" style="align-items:center;">
+      <input type="checkbox" id="orchSemantic" style="width:auto;" checked />
+      Semantic chapter division
+    </label>
+    <label class="row" style="align-items:center;">
+      <input type="checkbox" id="orchOcPerChunk" style="width:auto;" />
+      OpenClaw after each chunk (same tool name; args get <code>chunk_path</code>, <code>excerpt</code>, <code>workspace</code>)
+    </label>
+    <label style="margin-top:0.5rem;">Max verifier revision rounds (after staging)</label>
+    <input type="number" id="orchMaxRevisions" min="0" max="8" value="2" style="width:5rem;" />
+    <label style="margin-top:0.65rem;">Explicit requirements JSON (optional; overrides blank-line split of goal)</label>
+    <textarea id="orchStatementsJson" placeholder='[&quot;Tone: …&quot;, &quot;Must match Netflix beat sheet&quot;]' style="min-height:4rem; font-family: ui-monospace, monospace; font-size: 0.78rem;"></textarea>
+  </section>
+
   <section class="row">
     <button type="button" id="btnRun">Run full pipeline</button>
     <button type="button" id="btnPoll" class="secondary">Refresh state</button>
@@ -329,7 +451,7 @@
       <pre id="planThinkingOut" class="log" style="max-height:280px;">—</pre>
     </div>
     <div>
-      <label>Run log (explicit steps)</label>
+      <label>Run log (ASCII flow, chunk bars, plan/verify excerpts — CLI: add <code>--verbose</code> for full <code>thinking_trace</code>)</label>
       <pre id="logOut" class="log" style="max-height:280px;">—</pre>
     </div>
   </section>
@@ -362,6 +484,11 @@
     const LS_STUDIO_USER = "bookStudioUserId";
     const LS_GUIDED_THREAD = "bookSupThreadGuided";
     const LS_LLM = "bookLlmProvider";
+    const LS_ORCH_SEM = "bookOrchSemantic";
+    const LS_ORCH_OCPC = "bookOrchOcPerChunk";
+    const LS_ORCH_MAXREV = "bookOrchMaxRev";
+    const LS_ORCH_STMT = "bookOrchStmtJson";
+    const LS_LIB_BEARER = "bookLibraryBearer";
 
     let studioUserId = parseInt(localStorage.getItem(LS_STUDIO_USER) || "0", 10) || 0;
     let guidedThreadId = localStorage.getItem(LS_GUIDED_THREAD) || "";
@@ -395,6 +522,8 @@
       try {
         const d = await api("/api/ui-defaults");
         fromServer = (d.workspace || "").trim();
+        window.__manuscriptProxyConfigured = !!d.manuscript_samples_proxy_configured;
+        if ($("libProjectsRoot") && d.projects_root) $("libProjectsRoot").textContent = d.projects_root;
       } catch (e) { /* offline */ }
       const chosen = fromUrl || fromLs || fromServer;
       applyWorkspaceToBoth(chosen);
@@ -465,6 +594,17 @@
 
     $("useOc").onchange();
 
+    if (localStorage.getItem(LS_ORCH_SEM) === "0") $("orchSemantic").checked = false;
+    if (localStorage.getItem(LS_ORCH_OCPC) === "1") $("orchOcPerChunk").checked = true;
+    const _mr = localStorage.getItem(LS_ORCH_MAXREV);
+    if (_mr !== null && _mr !== "") $("orchMaxRevisions").value = _mr;
+    const _sj = localStorage.getItem(LS_ORCH_STMT);
+    if (_sj) $("orchStatementsJson").value = _sj;
+    $("orchSemantic").onchange = () => localStorage.setItem(LS_ORCH_SEM, $("orchSemantic").checked ? "1" : "0");
+    $("orchOcPerChunk").onchange = () => localStorage.setItem(LS_ORCH_OCPC, $("orchOcPerChunk").checked ? "1" : "0");
+    $("orchMaxRevisions").addEventListener("change", () => localStorage.setItem(LS_ORCH_MAXREV, $("orchMaxRevisions").value));
+    $("orchStatementsJson").addEventListener("blur", () => localStorage.setItem(LS_ORCH_STMT, $("orchStatementsJson").value));
+
     const llmSel = $("llmProvider");
     const savedLlm = localStorage.getItem(LS_LLM);
     if (savedLlm && llmSel && [...llmSel.options].some((o) => o.value === savedLlm)) llmSel.value = savedLlm;
@@ -499,7 +639,11 @@
         : "—";
       if (runTagEl && !guided) {
         const rs = await api(`/api/supervisor/status/${encodeURIComponent(tid)}`).catch(() => ({ run: "" }));
-        runTagEl.textContent = "run: " + (rs.run || "?");
+        let tag = "run: " + (rs.run || "?");
+        if (v.verification_passed !== undefined && v.verification_passed !== null) {
+          tag += " · verify: " + (v.verification_passed ? "PASS" : "FAIL");
+        }
+        runTagEl.textContent = tag;
         runTagEl.className = "tag " + (rs.run === "done" ? "ok" : rs.run === "running" ? "" : rs.run && rs.run.startsWith("error") ? "err" : "");
       }
     }
@@ -693,7 +837,8 @@
       if (!name) { alert("Project name required"); return; }
       if (!studioUserId) await studioBootstrap();
       try {
-        const out = await api("/api/studio/projects", {
+        const qs = new URLSearchParams({ user_id: String(studioUserId), name });
+        const out = await api(`/api/studio/projects?${qs}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: studioUserId, name }),
@@ -744,6 +889,10 @@
           openclaw_args_json: $("ocArgs").value.trim() || "{}",
           manuscript_session_id: ($("includeMsSession").checked && msSessionId) ? msSessionId : "",
           include_manuscript_notes: $("includeMsSession").checked,
+          user_statements_json: ($("orchStatementsJson").value || "").trim(),
+          use_semantic_division: $("orchSemantic").checked,
+          openclaw_per_chunk: $("orchOcPerChunk").checked,
+          max_revision_rounds: Math.min(8, Math.max(0, parseInt($("orchMaxRevisions").value, 10) || 0)),
         };
         const out = await api("/api/supervisor/run", {
           method: "POST",
@@ -812,6 +961,10 @@
           openclaw_args_json: $("ocArgs").value.trim() || "{}",
           manuscript_session_id: ($("includeMsSession").checked && msSessionId) ? msSessionId : "",
           include_manuscript_notes: $("includeMsSession").checked,
+          user_statements_json: ($("orchStatementsJson").value || "").trim(),
+          use_semantic_division: $("orchSemantic").checked,
+          openclaw_per_chunk: $("orchOcPerChunk").checked,
+          max_revision_rounds: Math.min(8, Math.max(0, parseInt($("orchMaxRevisions").value, 10) || 0)),
         };
         const out = await api("/api/supervisor/guided/step", {
           method: "POST",
@@ -1106,6 +1259,298 @@
     $("msWorkspace").addEventListener("input", () => syncWorkspaceFields(true));
     $("msWorkspace").addEventListener("change", () => { syncWorkspaceFields(true); loadMsRecent(); });
 
+    if ($("libraryBearer")) {
+      $("libraryBearer").value = localStorage.getItem(LS_LIB_BEARER) || "";
+      $("libraryBearer").addEventListener("change", () => {
+        localStorage.setItem(LS_LIB_BEARER, $("libraryBearer").value);
+      });
+    }
+    $("libraryModalClose").onclick = () => {
+      $("libraryOverlay").classList.remove("open");
+      $("libraryOverlay").setAttribute("aria-hidden", "true");
+    };
+    $("libraryOverlay").addEventListener("click", (ev) => {
+      if (ev.target === $("libraryOverlay")) $("libraryModalClose").click();
+    });
+
+    $("pipelineModalClose").onclick = () => {
+      $("pipelineOverlay").classList.remove("open");
+      $("pipelineOverlay").setAttribute("aria-hidden", "true");
+    };
+    $("pipelineOverlay").addEventListener("click", (ev) => {
+      if (ev.target === $("pipelineOverlay")) $("pipelineModalClose").click();
+    });
+
+    function renderManifestQueueSummary(queue, pathStr) {
+      const host = $("libraryManifestSummary");
+      if (!host) return;
+      host.innerHTML = "";
+      if (!queue || !queue.length) {
+        const p = document.createElement("p");
+        p.className = "sub muted";
+        p.style.margin = "0";
+        p.innerHTML =
+          "No Gutendex manifest on disk — add <code>gutenberg_library/manifest.json</code> or set <code>BOOK_GUTENDEX_MANIFEST</code>. Queue column stays empty; rows sort A–Z.";
+        host.appendChild(p);
+        return;
+      }
+      const det = document.createElement("details");
+      const sum = document.createElement("summary");
+      sum.style.cursor = "pointer";
+      sum.textContent = `Manifest batch order: ${queue.length} book(s)` + (pathStr ? ` · ${pathStr}` : "");
+      det.appendChild(sum);
+      const ol = document.createElement("ol");
+      ol.style.cssText = "font-size:0.78rem;margin:0.35rem 0 0 1.1rem;max-height:10rem;overflow:auto;";
+      const cap = Math.min(queue.length, 100);
+      for (let i = 0; i < cap; i++) {
+        const row = queue[i];
+        const li = document.createElement("li");
+        li.textContent = `#${row.queue_index} · gut-${row.gutenberg_id}-… → ${row.project_id}`;
+        ol.appendChild(li);
+      }
+      det.appendChild(ol);
+      if (queue.length > cap) {
+        const more = document.createElement("p");
+        more.className = "muted";
+        more.style.margin = "0.25rem 0 0";
+        more.textContent = `… and ${queue.length - cap} more`;
+        det.appendChild(more);
+      }
+      host.appendChild(det);
+    }
+
+    async function openPipelineOutputsOverlay(ws) {
+      $("pipelineModalTitle").textContent = ws;
+      $("pipelineFileBody").textContent = "Loading…";
+      $("pipelineFileList").innerHTML = "";
+      $("pipelineOverlay").classList.add("open");
+      $("pipelineOverlay").setAttribute("aria-hidden", "false");
+      try {
+        const d = await api(`/api/projects-library/pipeline-stages?workspace=${encodeURIComponent(ws)}`);
+        const ul = $("pipelineFileList");
+        ul.innerHTML = "";
+        if (d.truncated) {
+          const note = document.createElement("li");
+          note.className = "muted";
+          note.textContent = "List truncated — first 400 paths";
+          ul.appendChild(note);
+        }
+        for (const f of d.files || []) {
+          const li = document.createElement("li");
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "ghost";
+          b.style.cssText = "width:100%;text-align:left;margin:0.12rem 0;font-size:0.74rem;padding:0.35rem 0.45rem;";
+          b.textContent = `${f.path} (${f.bytes} B)`;
+          b.onclick = async () => {
+            $("pipelineFileBody").textContent = "Loading…";
+            try {
+              const o = await api(
+                `/api/projects-library/output-file?workspace=${encodeURIComponent(ws)}&path=${encodeURIComponent(f.path)}`,
+              );
+              $("pipelineFileBody").textContent = o.content;
+            } catch (err) {
+              $("pipelineFileBody").textContent = err instanceof Error ? err.message : String(err);
+            }
+          };
+          li.appendChild(b);
+          ul.appendChild(li);
+        }
+        if (!(d.files || []).length) $("pipelineFileBody").textContent = "No outputs/*.md yet — run the supervisor.";
+      } catch (e) {
+        $("pipelineFileBody").textContent = e instanceof Error ? e.message : String(e);
+      }
+    }
+
+    function libraryAuthHeaders() {
+      const tok = ($("libraryBearer") && $("libraryBearer").value || "").trim();
+      const h = {};
+      if (tok) h["Authorization"] = "Bearer " + tok;
+      return h;
+    }
+
+    async function fetchRemoteCatalogJson() {
+      const r = await fetch("/api/manuscript-samples/proxy/catalog", { headers: libraryAuthHeaders() });
+      if (r.status === 503) return null;
+      const txt = await r.text();
+      if (!r.ok) throw new Error("remote " + r.status + " " + txt.slice(0, 200));
+      try {
+        return JSON.parse(txt);
+      } catch (e) {
+        throw new Error("remote: response not JSON");
+      }
+    }
+
+    function showLibraryModal(title, text) {
+      $("libraryModalTitle").textContent = title;
+      $("libraryModalBody").textContent = text;
+      $("libraryOverlay").classList.add("open");
+      $("libraryOverlay").setAttribute("aria-hidden", "false");
+    }
+
+    async function viewLocalLibraryFile(ws, kind) {
+      const u = `/api/projects-library/artifact?workspace=${encodeURIComponent(ws)}&kind=${encodeURIComponent(kind)}`;
+      const d = await api(u);
+      showLibraryModal(ws + " · " + d.path, d.content);
+    }
+
+    async function viewRemotePresigned(label, url) {
+      if (!url || !String(url).trim()) {
+        alert("No URL — use a subscriber Bearer token if the full manuscript is paid-only.");
+        return;
+      }
+      const r = await fetch(url);
+      if (!r.ok) {
+        alert("Download failed: " + r.status);
+        return;
+      }
+      const t = await r.text();
+      showLibraryModal(label, t);
+    }
+
+    async function refreshLibrary() {
+      const hint = $("libraryHint");
+      const tbody = $("libraryTbody");
+      tbody.innerHTML = "";
+      let local = { entries: [], projects_root: "" };
+      try {
+        local = await api("/api/projects-library/local");
+        if ($("libProjectsRoot") && local.projects_root) $("libProjectsRoot").textContent = local.projects_root;
+      } catch (e) {
+        hint.textContent = "Local scan failed: " + e.message;
+      }
+
+      let remote = null;
+      if (window.__manuscriptProxyConfigured) {
+        try {
+          remote = await fetchRemoteCatalogJson();
+        } catch (e) {
+          hint.textContent = (hint.textContent ? hint.textContent + " · " : "") + "Remote: " + e.message;
+        }
+      } else if (!hint.textContent || hint.textContent === "—") {
+        hint.textContent = "Remote catalog disabled — set MANUSCRIPT_SAMPLES_API_BASE on the UI server.";
+      }
+
+      const byId = new Map();
+      for (const e of local.entries || []) {
+        byId.set(e.id, { local: e, remoteSample: null });
+      }
+      if (remote && Array.isArray(remote.samples)) {
+        for (const s of remote.samples) {
+          const id = String(s.projectId);
+          const cur = byId.get(id) || { local: null, remoteSample: null };
+          cur.remoteSample = s;
+          byId.set(id, cur);
+        }
+      }
+
+      const ids = [...byId.keys()].sort((a, b) => a.localeCompare(b));
+      if (!ids.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 5;
+        td.className = "muted";
+        td.textContent = "No completed local projects and no remote catalog rows.";
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
+
+      renderManifestQueueSummary(local.manifest_queue, local.gutendex_manifest_path || "");
+
+      for (const id of ids) {
+        const row = byId.get(id);
+        const tr = document.createElement("tr");
+        const td1 = document.createElement("td");
+        const strong = document.createElement("strong");
+        strong.textContent = (row.local && row.local.title) || (row.remoteSample && row.remoteSample.title) || id;
+        td1.appendChild(strong);
+        const sub = document.createElement("div");
+        sub.className = "mono";
+        sub.style.cssText = "font-size:0.72rem;margin-top:0.25rem;color:var(--muted)";
+        sub.textContent = id;
+        td1.appendChild(sub);
+
+        const tdq = document.createElement("td");
+        const qix = row.local && row.local.manifest_queue_index;
+        tdq.textContent = qix != null ? String(qix) : "—";
+        tdq.className = "mono";
+
+        const td2 = document.createElement("td");
+        const parts = [];
+        if (row.local) parts.push("<span class=tag>local</span>");
+        if (row.remoteSample) parts.push("<span class=tag>api</span>");
+        if (remote && remote.fullManuscriptUnlocked) parts.push("<span class=tag>full</span>");
+        td2.innerHTML = parts.join(" ");
+
+        const td3 = document.createElement("td");
+        const brief =
+          (row.local && row.local.userAskPreview) ||
+          (row.remoteSample && row.remoteSample.userAsk) ||
+          "";
+        td3.textContent = brief ? (brief.length > 200 ? brief.slice(0, 199) + "…" : brief) : "—";
+
+        const td4 = document.createElement("td");
+        const tool = document.createElement("div");
+        tool.className = "pill-row";
+        tool.style.flexWrap = "wrap";
+        tool.style.gap = "0.35rem";
+
+        const addBtn = (label, onClick, disabled) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "ghost";
+          b.style.marginTop = "0";
+          b.style.width = "auto";
+          b.textContent = label;
+          if (disabled) b.disabled = true;
+          b.onclick = onClick;
+          tool.appendChild(b);
+        };
+
+        if (row.local) {
+          addBtn("Use workspace", () => {
+            applyWorkspaceToBoth(row.local.workspace);
+            persistWorkspace();
+            void memoryReloadTree();
+            void refreshUsage();
+            void refreshUsageEstimate();
+            void refreshLlmHint();
+          });
+          addBtn("Chunk outputs", () => openPipelineOutputsOverlay(row.local.workspace));
+          const a = row.local.artifacts;
+          addBtn("Draft", () => viewLocalLibraryFile(row.local.workspace, "draft"), !a.draft_md);
+          addBtn("Export", () => viewLocalLibraryFile(row.local.workspace, "converted"), !a.converted_relpath);
+          addBtn("Staging", () => viewLocalLibraryFile(row.local.workspace, "staging"), !a.staging_merged);
+          addBtn("Canonical", () => viewLocalLibraryFile(row.local.workspace, "canonical"), !a.canonical_merged);
+        }
+        if (row.remoteSample) {
+          const rs = row.remoteSample;
+          addBtn("API preview", () => viewRemotePresigned(id + " · preview", rs.previewUrl), !rs.previewUrl);
+          addBtn("API full", () => viewRemotePresigned(id + " · full", rs.convertedUrl), !rs.convertedUrl);
+          if (rs.originalUrl) {
+            addBtn("Original S3", () => { window.open(rs.originalUrl, "_blank", "noopener,noreferrer"); });
+          }
+        }
+        td4.appendChild(tool);
+        tr.appendChild(td1);
+        tr.appendChild(tdq);
+        tr.appendChild(td2);
+        tr.appendChild(td3);
+        tr.appendChild(td4);
+        tbody.appendChild(tr);
+      }
+
+      if (ids.length) {
+        hint.textContent =
+          ids.length +
+          " project(s)" +
+          (local.projects_root ? " · " + local.projects_root : "") +
+          (window.__manuscriptProxyConfigured ? " · merged with API catalog" : "");
+      }
+    }
+
+    $("btnLibraryRefresh").onclick = () => refreshLibrary();
+
     (async function bootstrap() {
       await initWorkspace();
       await refreshLlmHint();
@@ -1132,6 +1577,7 @@
           localStorage.removeItem("bookMsSession");
         }
       }
+      await refreshLibrary();
     })();
   </script>
 </body>

@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "job": {
+    "user_id": "user_42",
+    "username": "alex",
+    "project_slug": "oz-2300-pilot",
+    "project_display_name": "Wizard of Oz — 2300 AD pilot",
+    "client_job_id": "browser-run-20260425-001",
+    "client_status": "ready",
+    "submitted_at": "2026-04-25T16:05:00Z",
+    "notes": "Uploaded from studio; worker should claim when status is ready."
+  },
+  "manuscript": {
+    "filename": "draft.md",
+    "content_type": "text/markdown",
+    "s3_key": "users/user_42/jobs/2026-04-25/job_1714060800000_ab12cd34/inputs/manuscript/draft.md",
+    "byte_size": 245000,
+    "sha256_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "adaptation": {
+    "primary_intent": "netflix_screenplay",
+    "preset": "netflix_script",
+    "freeform_goal": "Lean shootable lines; streaming cold open under 30s; 70/20/10 tone mix; gore only as spikes.",
+    "user_statements": [
+      "Change period to 2300 AD.",
+      "Keep ensemble structure.",
+      "One character arc: Dorothy affirms she does not want to be special—she wants to go home.",
+      "Scarecrow voice: dark humor + fractured logic.",
+      "Tin Man: restrained grief.",
+      "Lion: shame + insecure bravo."
+    ],
+    "languages": { "source": "en", "target": "en" },
+    "setting": {
+      "era_label": "2300 AD",
+      "geography": "Great Plains megastate; Emerald megacity on horizon",
+      "demography_notes": "Multigenerational ensemble; class stratification implied by tech access"
+    },
+    "structure": {
+      "format": "screenplay",
+      "episode_count_hint": 1,
+      "cold_open_seconds_target": 25,
+      "arc_notes": "Teaser: Kansas survival nightmare; inciting: cyclone; act 2: Munchkin reveal; act 3: silver shoes bond; hook: emerald tower + watcher."
+    },
+    "length": { "target": "shorter", "target_words_approx": 18000 },
+    "character_changes": [],
+    "tone": {
+      "dark_wonder_pct": 70,
+      "humor_pct": 20,
+      "gore_spike_pct": 10,
+      "gore_policy": "Strategic only (Witch death, Tin Man flashback); never constant."
+    },
+    "visual_planning": { "want_scene_needs_pass": true, "want_illustrations": true }
+  },
+  "book_pipeline": {
+    "llm_provider": "ollama",
+    "thread_id": "oz-2300-run1",
+    "use_openclaw_after_plan": false,
+    "openclaw_tool": "",
+    "openclaw_args_json": "{}",
+    "manuscript_session_id": null,
+    "include_manuscript_notes": true,
+    "user_statements_json": "[]",
+    "use_semantic_division": true,
+    "openclaw_per_chunk": false,
+    "max_revision_rounds": 2,
+    "ingest": {
+      "archive_sections": true,
+      "output_format": "docx",
+      "output_name": "oz_2300_pilot.docx",
+      "stamp_export_filename": true,
+      "plan_gate": false,
+      "prep_gate": false,
+      "auto_prep": false,
+      "skip_prep_requirement": false
+    }
+  }
+}

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from book_pipeline.anthropic_client import anthropic_messages
 from book_pipeline.config import Settings
 from book_pipeline.ollama_client import ollama_chat
+from book_pipeline.usage_stats import write_project_metrics_summary
 
 
 def resolve_llm_provider(settings: Settings, override: str | None) -> str:
@@ -13,6 +15,14 @@ def resolve_llm_provider(settings: Settings, override: str | None) -> str:
     if raw in ("anthropic", "claude"):
         return "anthropic"
     return "ollama"
+
+
+def _refresh_metrics_each_call() -> bool:
+    """Rewrite ``project_metrics_summary.json`` after each LLM call (default: on). Set env to ``0`` to skip."""
+    raw = (os.environ.get("BOOK_PIPELINE_REFRESH_METRICS_EACH_CALL") or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
 
 
 def complete_chat(
@@ -58,17 +68,24 @@ def complete_chat(
             thinking_mode=settings.anthropic_thinking,
             thinking_budget=budget,
             usage_log_path=path,
+            log_tag=tag,
         )
         meta = {"provider": "anthropic", "tag": tag, **usage}
+        if _refresh_metrics_each_call():
+            write_project_metrics_summary(workspace)
         return text, thinking, meta
 
     path = usage_dir / "ollama_usage.jsonl"
-    text = ollama_chat(
+    text, o_row = ollama_chat(
         settings.ollama_base_url,
         settings.ollama_model,
         messages,
         temperature=temperature,
         num_ctx=ollama_num_ctx,
         usage_log_path=path,
+        log_tag=tag,
+        timeout=float(settings.ollama_http_timeout_seconds),
     )
-    return text, "", {"provider": "ollama", "tag": tag}
+    if _refresh_metrics_each_call():
+        write_project_metrics_summary(workspace)
+    return text, "", {"provider": "ollama", "tag": tag, **(o_row or {})}

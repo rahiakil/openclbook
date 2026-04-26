@@ -7,6 +7,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from book_pipeline.config import Settings, load_settings
+from book_pipeline.gutenberg import strip_project_gutenberg_boilerplate
 from book_pipeline.ingest import read_document
 from book_pipeline.memory import append_research_note, load_memory_markdown
 from book_pipeline.ollama_client import ollama_chat
@@ -58,7 +59,7 @@ def node_prepare(state: PipelineState) -> PipelineState:
             "log": _log(state, f"error: missing {src_rel}"),
         }
     try:
-        text = read_document(src_path)
+        text = strip_project_gutenberg_boilerplate(read_document(src_path))
     except Exception as e:  # noqa: BLE001
         return {
             **state,
@@ -128,12 +129,14 @@ def node_generate(state: PipelineState) -> PipelineState:
     ]
     try:
         _usage = Path(state["workspace"]) / ".pipeline" / "ollama_usage.jsonl"
-        out = ollama_chat(
+        out, _usage_row = ollama_chat(
             settings.ollama_base_url,
             settings.ollama_model,
             messages,
             temperature=float(task.get("temperature", 0.35)),
             usage_log_path=_usage,
+            log_tag="graph_generate",
+            timeout=float(settings.ollama_http_timeout_seconds),
         )
     except Exception as e:  # noqa: BLE001
         return {**state, "error": str(e), "log": _log(state, f"generate error: {e}")}

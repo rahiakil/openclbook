@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -31,7 +30,7 @@ if str(ROOT) not in sys.path:
 
 from book_pipeline.config import load_settings  # noqa: E402
 from book_pipeline.llm_complete import complete_chat  # noqa: E402
-from book_pipeline.project_workspace import projects_root, sanitize_project_id  # noqa: E402
+from book_pipeline.project_workspace import projects_root, slug_gutendex_project_id  # noqa: E402
 from book_pipeline.supervisor.orchestration import extract_json_object  # noqa: E402
 
 PRESETS = [
@@ -44,11 +43,6 @@ PRESETS = [
     "rewrite",
     "docs",
 ]
-
-
-def slug_project_id(gut_id: int, title: str) -> str:
-    raw = re.sub(r"[^a-zA-Z0-9._-]+", "-", f"gut-{gut_id}-{title}").strip("-") or f"gut-{gut_id}"
-    return sanitize_project_id(raw)
 
 
 def brainstorm(
@@ -190,7 +184,7 @@ def main() -> int:
             stmts = []
         stmts_json = json.dumps([str(s).strip() for s in stmts if str(s).strip()], ensure_ascii=False)
 
-        project_id = slug_project_id(bid, title)
+        project_id = slug_gutendex_project_id(bid, title)
         print(f"  project_id={project_id} preset={preset}", flush=True)
 
         subprocess.run(

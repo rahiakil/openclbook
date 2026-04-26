@@ -58,6 +58,21 @@ Job types
 
   payload: { "argv": ["python", "-c", "print(1)"] }  # first element can be ``python`` or absolute
 
+**manuscript_ingest** — user-uploaded source via Sceneweaver / ``POST /v1/jobs``::
+
+  payload: {
+    "filename": "novel.docx",
+    "document_base64": "<optional base64>",
+    "document_text": "<optional utf-8 if no file>",
+    "user_goal": "instructions for the supervisor",
+    "goal_preset": "rewrite|netflix_script|…",
+    "output_format": "md|txt|docx",
+    "project_id": "<optional slug under projects/>",
+    "settings_workspace": "workspace"
+  }
+
+  Runs ``init-project`` then ``ingest-run --project-id … --input .pipeline/remote_uploads/<filename>``.
+
 Outstanding completions
 -----------------------
 
@@ -70,6 +85,8 @@ Fabletome stack: after ``terraform apply`` with ``book_pipeline_worker_token`` s
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import socket
@@ -161,7 +178,7 @@ def claim_job(client: httpx.Client) -> dict[str, Any] | None:
     claim_path = _env("REMOTE_JOBS_CLAIM_PATH", "/v1/jobs/claim")
     body = {
         "worker_id": _env("REMOTE_JOBS_WORKER_ID") or socket.gethostname(),
-        "capabilities": ["gutendex_ingest", "upload_manuscripts", "shell"],
+        "capabilities": ["gutendex_ingest", "upload_manuscripts", "shell", "manuscript_ingest"],
     }
     r = client.post(_url(claim_path), headers=_headers(), json=body, timeout=60.0)
     r.raise_for_status()
@@ -285,6 +302,117 @@ def run_upload_manuscripts(client: httpx.Client, job_id: str, payload: dict[str,
     return code == 0, tail or f"exit {code}"
 
 
+def run_manuscript_ingest(client: httpx.Client, job_id: str, payload: dict[str, Any]) -> tuple[bool, str]:
+    """Create ``projects/<id>/``, materialize upload, run ``ingest-run`` with Ollama (local)."""
+    from book_pipeline.project_workspace import sanitize_project_id
+
+    filename = (payload.get("filename") or "").strip() or "source.md"
+    filename = Path(filename).name
+    if not filename or ".." in filename:
+        return False, "invalid filename"
+
+    suf = Path(filename).suffix.lower()
+    allowed = (".md", ".txt", ".docx", ".html", ".odt", ".rtf", ".doc")
+    if suf not in allowed:
+        return False, f"unsupported file extension {suf!r} (allowed: {allowed})"
+
+    goal = (payload.get("user_goal") or "").strip()
+    if not goal:
+        return False, "user_goal is required"
+
+    preset = (payload.get("goal_preset") or "rewrite").strip()
+    out_fmt = (payload.get("output_format") or "md").strip().lower()
+    if out_fmt not in ("md", "txt", "docx"):
+        out_fmt = "md"
+
+    raw_pid = (payload.get("project_id") or "").strip() or f"sw-{job_id}"
+    try:
+        pid = sanitize_project_id(raw_pid)
+    except ValueError:
+        try:
+            pid = sanitize_project_id(f"sw-{job_id}")
+        except ValueError:
+            pid = sanitize_project_id("sw-submit")
+
+    b64 = payload.get("document_base64")
+    text = payload.get("document_text")
+
+    def log_line(ln: str) -> None:
+        print(ln, flush=True)
+
+    progress_job(client, job_id, 0.02, f"init-project {pid}")
+    code_init = _run_subprocess(
+        job_id,
+        [sys.executable, "-m", "book_pipeline", "init-project", pid],
+        ROOT,
+        log_line,
+    )
+    if code_init != 0:
+        return False, f"init-project exit {code_init}"
+
+    from book_pipeline.project_workspace import project_workspace_path
+
+    ws = project_workspace_path(pid)
+    up = ws / ".pipeline" / "remote_uploads"
+    up.mkdir(parents=True, exist_ok=True)
+    dest = (up / filename).resolve()
+    try:
+        dest.relative_to(ws.resolve())
+    except ValueError:
+        return False, "invalid upload path"
+
+    if b64 is not None and str(b64).strip():
+        try:
+            raw = base64.b64decode(str(b64).strip(), validate=False)
+        except (ValueError, binascii.Error) as e:
+            return False, f"invalid document_base64: {e}"
+        if len(raw) > 5 * 1024 * 1024:
+            return False, "document too large (max 5 MiB decoded)"
+        dest.write_bytes(raw)
+    elif text is not None and str(text).strip():
+        dest.write_text(str(text), encoding="utf-8", errors="replace")
+    else:
+        return False, "document_base64 or document_text is required"
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "book_pipeline",
+        "ingest-run",
+        "--project-id",
+        pid,
+        "--input",
+        str(dest),
+        "--goal",
+        goal,
+        "--preset",
+        preset,
+        "--output-format",
+        out_fmt,
+        "--stream",
+    ]
+    lines: list[str] = []
+
+    def on_line(ln: str) -> None:
+        lines.append(ln)
+        print(ln, flush=True)
+        if len(lines) % 35 == 0:
+            try:
+                progress_job(
+                    client,
+                    job_id,
+                    0.08 + 0.88 * min(1.0, len(lines) / 8000.0),
+                    ln[:480],
+                )
+            except Exception:
+                pass
+
+    progress_job(client, job_id, 0.06, "ingest-run starting")
+    code = _run_subprocess(job_id, cmd, ROOT, on_line)
+    tail = "\n".join(lines[-80:])
+    return code == 0, tail or f"exit {code}"
+
+
 def run_shell(client: httpx.Client, job_id: str, payload: dict[str, Any]) -> tuple[bool, str]:
     argv = payload.get("argv")
     if not isinstance(argv, list) or not argv:
@@ -318,6 +446,8 @@ def handle_job(client: httpx.Client, job: dict[str, Any]) -> None:
             ok, detail = run_upload_manuscripts(client, job_id, payload)
         elif typ == "shell":
             ok, detail = run_shell(client, job_id, payload)
+        elif typ == "manuscript_ingest":
+            ok, detail = run_manuscript_ingest(client, job_id, payload)
         else:
             ok, detail = False, f"unsupported job type: {typ!r}"
     except Exception as e:  # noqa: BLE001

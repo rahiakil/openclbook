@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaw.local/schemas/manuscript_job_v1.schema.json",
+  "title": "Book pipeline manuscript job (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job", "manuscript", "adaptation"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "project_slug", "client_status"],
+      "properties": {
+        "user_id": { "type": "string", "minLength": 1, "description": "Stable user id (matches pic-new-res jobs userId)" },
+        "username": { "type": "string", "description": "Display name; optional if user_id is canonical" },
+        "project_slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,119}$" },
+        "project_display_name": { "type": "string" },
+        "client_job_id": { "type": "string", "description": "Optional idempotency key from the browser" },
+        "client_status": {
+          "type": "string",
+          "enum": ["draft", "ready", "cancelled"],
+          "description": "draft = user still editing; ready = safe for worker to pick up"
+        },
+        "submitted_at": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      }
+    },
+    "manuscript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename"],
+      "properties": {
+        "filename": { "type": "string", "minLength": 1 },
+        "content_type": { "type": "string", "default": "text/markdown" },
+        "s3_key": {
+          "type": "string",
+          "description": "Full S3 object key after upload, under users/{userId}/jobs/{ymd}/{jobId}/..."
+        },
+        "byte_size": { "type": "integer", "minimum": 0 },
+        "sha256_hex": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "adaptation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary_intent"],
+      "properties": {
+        "primary_intent": {
+          "type": "string",
+          "enum": [
+            "netflix_screenplay",
+            "feature_film_screenplay",
+            "tv_episodic_arcs",
+            "stage_play",
+            "korean_drama_script",
+            "translation",
+            "translation_and_rewrite",
+            "length_reduction",
+            "period_change",
+            "character_identity_change",
+            "custom"
+          ]
+        },
+        "preset": {
+          "type": "string",
+          "description": "Maps to book_pipeline goal_preset / --preset",
+          "enum": [
+            "rewrite",
+            "netflix_script",
+            "stage_play",
+            "korean_drama_script",
+            "feature_film",
+            "tv_episodic_arcs",
+            "translation_adapt",
+            "docs"
+          ]
+        },
+        "freeform_goal": { "type": "string", "description": "Merged into supervisor user_goal" },
+        "user_statements": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Hard requirements (tone, gore level, era, ensemble rules, etc.)"
+        },
+        "languages": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": { "type": "string", "description": "ISO 639-1 or BCP47, e.g. en" },
+            "target": { "type": "string", "description": "For translation / adaptation" }
+          }
+        },
+        "setting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "era_label": { "type": "string", "examples": ["2300 AD", "Joseon dynasty", "near-future Seoul"] },
+            "geography": { "type": "string" },
+            "demography_notes": { "type": "string" }
+          }
+        },
+        "structure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "format": {
+              "type": "string",
+              "enum": ["screenplay", "stage_play", "bible_plus_pilot", "docs", "hybrid"]
+            },
+            "episode_count_hint": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "cold_open_seconds_target": { "type": "integer", "minimum": 5, "maximum": 120 },
+            "arc_notes": { "type": "string" }
+          }
+        },
+        "length": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "target": { "type": "string", "enum": ["shorter", "same_order", "longer", "unspecified"] },
+            "target_words_approx": { "type": "integer", "minimum": 0 },
+            "max_runtime_minutes_per_episode": { "type": "number", "minimum": 1 }
+          }
+        },
+        "character_changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["character", "change_type"],
+            "properties": {
+              "character": { "type": "string" },
+              "change_type": {
+                "type": "string",
+                "enum": ["gender_identity", "name", "age", "ethnicity_culture", "personality", "relationship", "other"]
+              },
+              "description": { "type": "string" },
+              "sensitivity": { "type": "string", "enum": ["standard", "high"] }
+            }
+          }
+        },
+        "tone": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dark_wonder_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "humor_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "gore_spike_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "gore_policy": { "type": "string" }
+          }
+        },
+        "visual_planning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "want_scene_needs_pass": { "type": "boolean", "default": true },
+            "want_illustrations": { "type": "boolean", "default": true }
+          }
+        }
+      }
+    },
+    "book_pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional: mirrors POST /api/supervisor/run RunBody + ingest flags",
+      "properties": {
+        "llm_provider": { "type": ["string", "null"], "enum": ["ollama", "anthropic", null] },
+        "thread_id": { "type": "string" },
+        "use_openclaw_after_plan": { "type": "boolean", "default": false },
+        "openclaw_tool": { "type": "string" },
+        "openclaw_args_json": { "type": "string" },
+        "manuscript_session_id": { "type": ["string", "null"] },
+        "include_manuscript_notes": { "type": "boolean", "default": true },
+        "user_statements_json": { "type": "string" },
+        "use_semantic_division": { "type": "boolean", "default": true },
+        "openclaw_per_chunk": { "type": "boolean", "default": false },
+        "max_revision_rounds": { "type": "integer", "minimum": 0, "maximum": 8, "default": 2 },
+        "ingest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "archive_sections": { "type": "boolean", "default": false },
+            "output_format": { "type": "string", "enum": ["md", "txt", "docx"], "default": "txt" },
+            "output_name": { "type": "string" },
+            "stamp_export_filename": { "type": "boolean", "default": true },
+            "plan_gate": { "type": "boolean", "default": false },
+            "prep_gate": { "type": "boolean", "default": false },
+            "auto_prep": { "type": "boolean", "default": false },
+            "skip_prep_requirement": { "type": "boolean", "default": false }
+          }
+        }
+      }
+    }
+  }
+}

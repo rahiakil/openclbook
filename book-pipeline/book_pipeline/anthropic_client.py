@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from book_pipeline.llm_stats_emit import emit_anthropic_stats_stderr
+
 
 def _append_anthropic_usage(path: Path, row: dict[str, Any]) -> None:
     try:
@@ -89,6 +91,7 @@ def anthropic_messages(
     thinking_budget: int = 10_000,
     timeout: float = 600.0,
     usage_log_path: Path | None = None,
+    log_tag: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """
     Call Anthropic Messages API. Returns (assistant_text, thinking_text, usage_dict).
@@ -119,22 +122,33 @@ def anthropic_messages(
     else:
         body["temperature"] = temperature
 
+    t0 = time.perf_counter()
     with httpx.Client(timeout=timeout) as client:
         r = client.post(url, headers=headers, json=body)
         r.raise_for_status()
         data = r.json()
+    wall_ms = (time.perf_counter() - t0) * 1000.0
 
     usage = data.get("usage") or {}
     if usage_log_path is not None:
-        _append_anthropic_usage(
-            usage_log_path,
-            {
-                "provider": "anthropic",
-                "model": model,
-                "input_tokens": usage.get("input_tokens"),
-                "output_tokens": usage.get("output_tokens"),
-            },
-        )
+        inp = int(usage.get("input_tokens") or 0)
+        out = int(usage.get("output_tokens") or 0)
+        tot = inp + out
+        dur_s = wall_ms / 1000.0
+        row: dict[str, Any] = {
+            "provider": "anthropic",
+            "model": model,
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "total_tokens": tot,
+            "wall_duration_ms": round(wall_ms, 3),
+            "tokens_per_second": round(tot / dur_s, 4) if dur_s > 0 and tot > 0 else None,
+            "wall_ms_per_1k_total_tokens": round((wall_ms / tot) * 1000.0, 4) if tot > 0 else None,
+        }
+        if log_tag:
+            row["tag"] = log_tag
+        emit_anthropic_stats_stderr(row)
+        _append_anthropic_usage(usage_log_path, row)
 
     content = data.get("content") or []
     thinking, text = _extract_thinking_and_text(content)

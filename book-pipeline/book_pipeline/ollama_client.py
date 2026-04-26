@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from book_pipeline.llm_stats_emit import emit_ollama_stats_stderr
+
 
 def _append_usage_log(path: Path, row: dict[str, Any]) -> None:
     try:
@@ -18,6 +20,35 @@ def _append_usage_log(path: Path, row: dict[str, Any]) -> None:
         pass
 
 
+def _ollama_usage_row(
+    model: str,
+    data: dict[str, Any],
+    *,
+    log_tag: str | None,
+) -> dict[str, Any]:
+    """Derive latency / throughput for project metrics (``ollama_usage.jsonl``)."""
+    p = int(data.get("prompt_eval_count") or 0)
+    c = int(data.get("eval_count") or 0)
+    tot = p + c
+    ns = int(data.get("total_duration") or 0)
+    dur_ms = ns / 1_000_000.0 if ns else 0.0
+    dur_s = ns / 1_000_000_000.0 if ns else 0.0
+    row: dict[str, Any] = {
+        "provider": "ollama",
+        "model": model,
+        "prompt_eval_count": p or None,
+        "eval_count": c or None,
+        "total_tokens": tot,
+        "total_duration_ns": ns or None,
+        "total_duration_ms": round(dur_ms, 3) if ns else None,
+        "tokens_per_second": round(tot / dur_s, 4) if dur_s > 0 and tot > 0 else None,
+        "wall_ms_per_1k_total_tokens": round((dur_ms / tot) * 1000.0, 4) if tot > 0 and dur_ms > 0 else None,
+    }
+    if log_tag:
+        row["tag"] = log_tag
+    return row
+
+
 def ollama_chat(
     base_url: str,
     model: str,
@@ -27,8 +58,9 @@ def ollama_chat(
     num_ctx: int | None = None,
     timeout: float = 600.0,
     usage_log_path: Path | None = None,
-) -> str:
-    """Call Ollama /api/chat; returns assistant message content only."""
+    log_tag: str | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Call Ollama /api/chat; returns ``(assistant_text, usage_row_or_none)``."""
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -43,21 +75,16 @@ def ollama_chat(
         r = client.post(url, json=payload)
         r.raise_for_status()
         data = r.json()
+    usage_row: dict[str, Any] | None = None
     if usage_log_path is not None:
-        _append_usage_log(
-            usage_log_path,
-            {
-                "model": model,
-                "prompt_eval_count": data.get("prompt_eval_count"),
-                "eval_count": data.get("eval_count"),
-                "total_duration_ns": data.get("total_duration"),
-            },
-        )
+        usage_row = _ollama_usage_row(model, data, log_tag=log_tag)
+        _append_usage_log(usage_log_path, usage_row)
+        emit_ollama_stats_stderr(usage_row)
     msg = data.get("message") or {}
     content = msg.get("content")
     if not isinstance(content, str):
-        return json.dumps(data, indent=2)
-    return content.strip()
+        return json.dumps(data, indent=2), usage_row
+    return content.strip(), usage_row
 
 
 def ollama_tags(base_url: str, timeout: float = 30.0) -> list[str]:
