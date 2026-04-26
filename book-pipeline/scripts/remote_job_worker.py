@@ -11,10 +11,11 @@ Environment
 
 - ``REMOTE_JOBS_BASE_URL`` — e.g. ``https://xxxx.execute-api.region.amazonaws.com/prod``
 
-**Auth** (one of)
+**Auth**
 
-- ``REMOTE_JOBS_TOKEN`` — sent as ``Authorization: Bearer <token>``
-- ``REMOTE_JOBS_API_KEY`` — sent as ``x-api-key: <key>``
+- **Fabletome / book-pipeline worker**: set ``REMOTE_JOBS_WORKER_TOKEN`` to the same value as Terraform
+  ``book_pipeline_worker_token``; it is sent as header ``X-Book-Pipeline-Worker`` on claim/progress/complete/fail.
+- **Other APIs** (optional): ``REMOTE_JOBS_TOKEN`` (``Authorization: Bearer``) or ``REMOTE_JOBS_API_KEY`` (``x-api-key``).
 
 **Optional**
 
@@ -63,7 +64,9 @@ Outstanding completions
 If the network drops after local work finishes, results are queued under
 ``.pipeline/remote_worker_outstanding.jsonl`` and retried before the next claim.
 
-Backend: implement claim/progress/complete/fail with API Gateway + Lambda + DynamoDB (or similar).
+Fabletome stack: after ``terraform apply`` with ``book_pipeline_worker_token`` set, use
+``REMOTE_JOBS_BASE_URL`` = ``api_base_url`` output (no path suffix). Create jobs with
+``POST /v1/jobs`` and ``runMode: book_pipeline`` (see Fabletome Lambda ``http.mjs``).
 """
 from __future__ import annotations
 
@@ -92,6 +95,9 @@ def _env(name: str, default: str | None = None) -> str | None:
 
 def _headers() -> dict[str, str]:
     h: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
+    wpt = _env("REMOTE_JOBS_WORKER_TOKEN") or _env("BOOK_PIPELINE_WORKER_TOKEN")
+    if wpt:
+        h["X-Book-Pipeline-Worker"] = wpt
     tok = _env("REMOTE_JOBS_TOKEN")
     if tok:
         h["Authorization"] = f"Bearer {tok}"
