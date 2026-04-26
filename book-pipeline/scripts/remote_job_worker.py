@@ -68,7 +68,14 @@ Job types
     "goal_preset": "rewrite|netflix_script|…",
     "output_format": "md|txt|docx",
     "project_id": "<optional slug under projects/>",
-    "settings_workspace": "workspace"
+    "settings_workspace": "workspace",
+    "adaptation_spec": {
+      "pipeline": "faithful|twist",
+      "seasons": 1,
+      "episodesPerSeason": 8,
+      "twistAxis": "time_period|character|mood|length|extra_season|prelude",
+      "notes": "optional freeform"
+    }
   }
 
   Runs ``init-project`` then ``ingest-run --project-id … --input .pipeline/remote_uploads/<filename>``.
@@ -213,6 +220,101 @@ def fail_job(client: httpx.Client, job_id: str, error: str) -> None:
     r.raise_for_status()
 
 
+def _expand_adaptation_spec(spec: dict[str, Any]) -> str:
+    """Mirror Sceneweaver ``buildUserGoalFromAdaptationSpec`` (keep in sync)."""
+    pipeline = str(spec.get("pipeline") or "faithful").strip().lower()
+    seasons = int(spec.get("seasons") or 1)
+    eps = int(spec.get("episodesPerSeason") or 8)
+    twist = str(spec.get("twistAxis") or "").strip().lower()
+    notes = str(spec.get("notes") or "").strip()
+    axis_hint: dict[str, str] = {
+        "time_period": "Re-stage in a different era or near-future; keep core plot beats recognizable.",
+        "character": "Rebalance POV / supporting cast; merge or reinterpret roles where it strengthens theme.",
+        "mood": "Shift tone (gothic, comedy, thriller) without breaking the spine of the plot.",
+        "length": "Emphasize tighter or more expansive episode rhythm; call out montage vs dialogue.",
+        "extra_season": "Reserve a B-plot spine for an additional season beyond the novel's natural close.",
+        "prelude": "Open with a framing cold open that pays off late; keep canon events intact afterward.",
+    }
+    if pipeline == "faithful":
+        base = (
+            "Faithful screenplay conversion: preserve plot, character arcs, and the author's intent. "
+            f"Target structure: {seasons} season(s), {eps} episodes per season. "
+            "Use industry-standard screenplay formatting and streaming act breaks. "
+            "Do not introduce deliberate high-concept twists unless the source already implies them."
+        )
+    else:
+        hint = axis_hint.get(twist, "Follow the user's twist brief.")
+        base = (
+            "Classical adaptation with a deliberate creative twist (still structurally coherent). "
+            f"Twist axis ({twist or 'custom'}): {hint} "
+            f"Target structure: {seasons} season(s), {eps} episodes per season. "
+            "Preserve recognizable story DNA while executing the twist boldly."
+        )
+    return f"{base}\n\nAdditional direction:\n{notes}" if notes else base
+
+
+def _merge_user_goal_with_adaptation(payload: dict[str, Any]) -> str:
+    base = str(payload.get("user_goal") or "").strip()
+    spec = payload.get("adaptation_spec")
+    if not isinstance(spec, dict) or not spec:
+        return base
+    block = _expand_adaptation_spec(spec)
+    if not base:
+        return block
+    return f"{base}\n\n--- adaptation_spec ---\n{block}"
+
+
+def _build_adaptation_tree(spec: dict[str, Any]) -> dict[str, Any]:
+    seasons_n = max(1, min(6, int(spec.get("seasons") or 1)))
+    eps_n = max(1, min(24, int(spec.get("episodesPerSeason") or 8)))
+    seasons: list[dict[str, Any]] = []
+    for si in range(1, seasons_n + 1):
+        episodes = [
+            {
+                "title": f"Episode {ei}",
+                "screenplay": "(Draft lives in project workspace after ingest-run completes.)",
+            }
+            for ei in range(1, eps_n + 1)
+        ]
+        seasons.append({"title": f"Season {si}", "episodes": episodes})
+    return {
+        "source": "Original manuscript / uploaded file in project .pipeline",
+        "seasons": seasons,
+    }
+
+
+def _fetch_job_messages(client: httpx.Client, job_id: str) -> list[Any]:
+    """Optional: set ``REMOTE_JOBS_READ_MESSAGES_TOKEN`` (Bearer) or reuse ``REMOTE_JOBS_TOKEN``."""
+    read_tok = _env("REMOTE_JOBS_READ_MESSAGES_TOKEN") or _env("REMOTE_JOBS_TOKEN")
+    if not read_tok:
+        return []
+    path = f"/v1/jobs/{job_id}/messages?limit=40"
+    try:
+        h = {"Content-Type": "application/json", "Accept": "application/json", "Authorization": f"Bearer {read_tok}"}
+        r = client.get(_url(path), headers=h, timeout=30.0)
+        if r.status_code >= 400:
+            return []
+        data = r.json()
+        msgs = data.get("messages") if isinstance(data, dict) else None
+        return msgs if isinstance(msgs, list) else []
+    except Exception:
+        return []
+
+
+def _messages_request_pause(messages: list[Any]) -> bool:
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        c = str(m.get("content") or "")
+        if "CONTROL:PAUSE" in c or "PAUSE_REQUEST:" in c:
+            return True
+    return False
+
+
+def _pre_ingest_pause_requested(client: httpx.Client, job_id: str) -> bool:
+    return _messages_request_pause(_fetch_job_messages(client, job_id))
+
+
 def _run_subprocess(job_id: str, argv: list[str], cwd: Path, on_line: Any) -> int:
     proc = subprocess.Popen(
         argv,
@@ -302,23 +404,29 @@ def run_upload_manuscripts(client: httpx.Client, job_id: str, payload: dict[str,
     return code == 0, tail or f"exit {code}"
 
 
-def run_manuscript_ingest(client: httpx.Client, job_id: str, payload: dict[str, Any]) -> tuple[bool, str]:
-    """Create ``projects/<id>/``, materialize upload, run ``ingest-run`` with Ollama (local)."""
+def run_manuscript_ingest(client: httpx.Client, job_id: str, payload: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+    """Create ``projects/<id>/``, materialize upload, run ``ingest-run`` with Ollama (local).
+
+    Returns ``(ok, log_tail, result_extras)`` where ``result_extras`` is merged into the job completion body.
+    """
     from book_pipeline.project_workspace import sanitize_project_id
 
     filename = (payload.get("filename") or "").strip() or "source.md"
     filename = Path(filename).name
     if not filename or ".." in filename:
-        return False, "invalid filename"
+        return False, "invalid filename", {}
 
     suf = Path(filename).suffix.lower()
     allowed = (".md", ".txt", ".docx", ".html", ".odt", ".rtf", ".doc")
     if suf not in allowed:
-        return False, f"unsupported file extension {suf!r} (allowed: {allowed})"
+        return False, f"unsupported file extension {suf!r} (allowed: {allowed})", {}
 
-    goal = (payload.get("user_goal") or "").strip()
+    goal = _merge_user_goal_with_adaptation(payload)
     if not goal:
-        return False, "user_goal is required"
+        return False, "user_goal is required (or adaptation_spec must expand to non-empty text)", {}
+
+    if _pre_ingest_pause_requested(client, job_id):
+        return False, "paused_before_start: CONTROL:PAUSE or PAUSE_REQUEST in job messages", {}
 
     preset = (payload.get("goal_preset") or "rewrite").strip()
     out_fmt = (payload.get("output_format") or "md").strip().lower()
@@ -348,7 +456,7 @@ def run_manuscript_ingest(client: httpx.Client, job_id: str, payload: dict[str, 
         log_line,
     )
     if code_init != 0:
-        return False, f"init-project exit {code_init}"
+        return False, f"init-project exit {code_init}", {}
 
     from book_pipeline.project_workspace import project_workspace_path
 
@@ -359,20 +467,20 @@ def run_manuscript_ingest(client: httpx.Client, job_id: str, payload: dict[str, 
     try:
         dest.relative_to(ws.resolve())
     except ValueError:
-        return False, "invalid upload path"
+        return False, "invalid upload path", {}
 
     if b64 is not None and str(b64).strip():
         try:
             raw = base64.b64decode(str(b64).strip(), validate=False)
         except (ValueError, binascii.Error) as e:
-            return False, f"invalid document_base64: {e}"
+            return False, f"invalid document_base64: {e}", {}
         if len(raw) > 5 * 1024 * 1024:
-            return False, "document too large (max 5 MiB decoded)"
+            return False, "document too large (max 5 MiB decoded)", {}
         dest.write_bytes(raw)
     elif text is not None and str(text).strip():
         dest.write_text(str(text), encoding="utf-8", errors="replace")
     else:
-        return False, "document_base64 or document_text is required"
+        return False, "document_base64 or document_text is required", {}
 
     cmd = [
         sys.executable,
@@ -410,7 +518,12 @@ def run_manuscript_ingest(client: httpx.Client, job_id: str, payload: dict[str, 
     progress_job(client, job_id, 0.06, "ingest-run starting")
     code = _run_subprocess(job_id, cmd, ROOT, on_line)
     tail = "\n".join(lines[-80:])
-    return code == 0, tail or f"exit {code}"
+    spec_raw = payload.get("adaptation_spec")
+    extras: dict[str, Any] = {}
+    if isinstance(spec_raw, dict) and spec_raw:
+        extras["adaptation_tree"] = _build_adaptation_tree(spec_raw)
+        extras["adaptation_spec"] = spec_raw
+    return code == 0, tail or f"exit {code}", extras
 
 
 def run_shell(client: httpx.Client, job_id: str, payload: dict[str, Any]) -> tuple[bool, str]:
@@ -439,6 +552,7 @@ def handle_job(client: httpx.Client, job: dict[str, Any]) -> None:
 
     ok = False
     detail = ""
+    extra: dict[str, Any] = {}
     try:
         if typ == "gutendex_ingest":
             ok, detail = run_gutendex_ingest(client, job_id, payload)
@@ -447,18 +561,21 @@ def handle_job(client: httpx.Client, job: dict[str, Any]) -> None:
         elif typ == "shell":
             ok, detail = run_shell(client, job_id, payload)
         elif typ == "manuscript_ingest":
-            ok, detail = run_manuscript_ingest(client, job_id, payload)
+            ok, detail, extra = run_manuscript_ingest(client, job_id, payload)
         else:
-            ok, detail = False, f"unsupported job type: {typ!r}"
+            ok, detail, extra = False, f"unsupported job type: {typ!r}", {}
     except Exception as e:  # noqa: BLE001
-        ok, detail = False, f"{type(e).__name__}: {e}"
+        ok, detail, extra = False, f"{type(e).__name__}: {e}", {}
 
-    body = {
+    body: dict[str, Any] = {
         "ok": ok,
         "type": typ,
         "worker_id": _env("REMOTE_JOBS_WORKER_ID") or socket.gethostname(),
         "log_tail": detail[-8000:] if detail else "",
     }
+    if isinstance(extra, dict) and extra:
+        # Prefer nesting so ``GET /v1/jobs/{id}`` can expose ``result.adaptation_tree`` for Studio.
+        body["result"] = dict(extra)
     try:
         if ok:
             progress_job(client, job_id, 1.0, "complete")
