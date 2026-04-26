@@ -12,3 +12,6 @@ gutenberg_library/clean/
 
 # Local snapshot from upload_completed_manuscripts_s3.py (regenerate anytime)
 samples_index.latest.json
+
+# Local worker retry queue (remote_job_worker.py)
+.pipeline/remote_worker_outstanding.jsonl
