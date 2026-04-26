@@ -27,6 +27,13 @@ S3 object layout::
   projects/<project_id>/project_manifest.json
   samples_index.json                          # registry for UIs / ops
 
+Resume behavior:
+  - By default, reruns are safe: the script skips projects that already have
+    ``project_manifest.json`` in S3 (and verifies the other objects exist).
+  - If a previous run was interrupted, a subsequent run will upload only the
+    missing objects for each project, then rewrite the manifest and index.
+  - Use ``--force`` to re-upload/overwrite everything for the selected projects.
+
 Chapter boundaries for ``preview.txt`` are detected from converted text: lines matching
 ``...#chapter-NN...`` (staging merge) or markdown ``^##\\s+Chapter`` / ``^#\\s+Chapter``.
 """
@@ -221,6 +228,22 @@ def _s3_base(prefix: str, project_id: str) -> str:
     parts = [p.strip("/") for p in (prefix, project_id) if p and p.strip("/")]
     return "/".join(parts)
 
+def _s3_exists(s3, *, bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def _s3_get_json(s3, *, bucket: str, key: str) -> dict[str, Any] | None:
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"].read()
+        return json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
+
 
 def upload_one(
     s3,
@@ -229,6 +252,8 @@ def upload_one(
     payload: dict[str, Any],
     free_chapters: int,
     dry_run: bool,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     base = _s3_base(prefix, payload["project_id"])
     keys = {
@@ -250,16 +275,27 @@ def upload_one(
     if dry_run:
         return {"keys": keys, "project_manifest": pm}
 
+    # Upload missing objects only (resume-safe), unless force=True.
+    have = {}
+    if not force:
+        for k in ("original", "converted", "user_ask", "preview", "project_manifest"):
+            have[k] = _s3_exists(s3, bucket=bucket, key=keys[k])
+
     extra = {"ContentType": "text/plain; charset=utf-8"}
-    s3.upload_file(str(payload["original_path"]), bucket, keys["original"], ExtraArgs=extra)
-    s3.upload_file(str(payload["converted_path"]), bucket, keys["converted"], ExtraArgs=extra)
-    s3.put_object(Bucket=bucket, Key=keys["user_ask"], Body=payload["user_ask"].encode("utf-8"), **extra)
-    s3.put_object(
-        Bucket=bucket,
-        Key=keys["preview"],
-        Body=(payload.get("preview_text") or "").encode("utf-8"),
-        **extra,
-    )
+    if force or not have.get("original"):
+        s3.upload_file(str(payload["original_path"]), bucket, keys["original"], ExtraArgs=extra)
+    if force or not have.get("converted"):
+        s3.upload_file(str(payload["converted_path"]), bucket, keys["converted"], ExtraArgs=extra)
+    if force or not have.get("user_ask"):
+        s3.put_object(Bucket=bucket, Key=keys["user_ask"], Body=payload["user_ask"].encode("utf-8"), **extra)
+    if force or not have.get("preview"):
+        s3.put_object(
+            Bucket=bucket,
+            Key=keys["preview"],
+            Body=(payload.get("preview_text") or "").encode("utf-8"),
+            **extra,
+        )
+    # Always (re)write manifest: it is the resume marker and the canonical pointer set.
     s3.put_object(
         Bucket=bucket,
         Key=keys["project_manifest"],
@@ -276,6 +312,7 @@ def main() -> int:
     ap.add_argument("--prefix", default=os.environ.get("MANUSCRIPTS_S3_PREFIX", ""))
     ap.add_argument("--free-chapters", type=int, default=int(os.environ.get("MANUSCRIPTS_FREE_CHAPTERS", "3")))
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true", help="Re-upload/overwrite even if already present in S3")
     ap.add_argument(
         "--emit-sceneweaver",
         type=Path,
@@ -321,14 +358,55 @@ def main() -> int:
     if not args.dry_run and boto3 is not None:
         s3_client = boto3.client("s3")
 
+    # Best-effort: read remote samples_index.json for visibility / progress. We still
+    # verify per-project object presence so index drift won't break resume.
+    already_uploaded: set[str] = set()
+    if s3_client is not None and not args.force:
+        idx_key = _s3_base(args.prefix, "samples_index.json")
+        remote = _s3_get_json(s3_client, bucket=args.bucket, key=idx_key) or {}
+        for p in remote.get("projects") or []:
+            if isinstance(p, dict) and isinstance(p.get("project_id"), str):
+                already_uploaded.add(p["project_id"])
+
     index_samples: list[dict[str, Any]] = []
     for pl in payloads:
         if args.dry_run or s3_client is None:
             out = upload_one(None, args.bucket, args.prefix, pl, args.free_chapters, dry_run=True)
             print(f"[dry-run] {pl['project_id']} -> {out['keys']}")
         else:
-            out = upload_one(s3_client, args.bucket, args.prefix, pl, args.free_chapters, dry_run=False)
-            print(f"uploaded {pl['project_id']}")
+            base = _s3_base(args.prefix, pl["project_id"])
+            manifest_key = f"{base}/project_manifest.json"
+
+            if (pl["project_id"] in already_uploaded or _s3_exists(s3_client, bucket=args.bucket, key=manifest_key)) and not args.force:
+                # Resume marker exists. Only upload if other objects are missing.
+                dry = upload_one(None, args.bucket, args.prefix, pl, args.free_chapters, dry_run=True)
+                keys = dry["keys"]
+                missing = [k for k in ("original", "converted", "user_ask", "preview") if not _s3_exists(s3_client, bucket=args.bucket, key=keys[k])]
+                if not missing:
+                    out = {"project_manifest": {"objects": keys}}
+                    print(f"skip {pl['project_id']} (already uploaded)")
+                else:
+                    out = upload_one(
+                        s3_client,
+                        args.bucket,
+                        args.prefix,
+                        pl,
+                        args.free_chapters,
+                        dry_run=False,
+                        force=False,
+                    )
+                    print(f"resume {pl['project_id']} (uploaded missing: {', '.join(missing)})")
+            else:
+                out = upload_one(
+                    s3_client,
+                    args.bucket,
+                    args.prefix,
+                    pl,
+                    args.free_chapters,
+                    dry_run=False,
+                    force=args.force,
+                )
+                print(f"uploaded {pl['project_id']}")
         pm = out["project_manifest"]
         index_samples.append(
             {
